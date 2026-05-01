@@ -1,0 +1,99 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and household link",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "householdId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "householdId"]
+    },
+    "Household": {
+      "title": "Household",
+      "description": "Shared finance container",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "memberIds": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["name", "createdBy", "createdAt", "memberIds"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Income or expense record",
+      "type": "object",
+      "properties": {
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["income", "expense"] },
+        "scope": { "type": "string", "enum": ["personal", "shared"] },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "isRecurring": { "type": "boolean" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["amount", "type", "category", "date", "userId"]
+    },
+    "Goal": {
+      "title": "Goal",
+      "description": "Financial goal",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "targetAmount": { "type": "number" },
+        "currentAmount": { "type": "number" },
+        "deadline": { "type": "string", "format": "date" },
+        "icon": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "targetAmount", "currentAmount"]
+    },
+    "RecurringTransaction": {
+      "title": "Recurring Transaction",
+      "description": "Monthly automatic records",
+      "type": "object",
+      "properties": {
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["income", "expense"] },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "dayOfMonth": { "type": "integer" },
+        "userId": { "type": "string" },
+        "lastProcessed": { "type": "string", "format": "date" }
+      },
+      "required": ["amount", "type", "category", "dayOfMonth", "userId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Private user data mapping to household"
+    },
+    "/households/{householdId}": {
+      "schema": "Household",
+      "description": "Shared household container"
+    },
+    "/households/{householdId}/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Transactions within a household"
+    },
+    "/households/{householdId}/goals/{goalId}": {
+      "schema": "Goal",
+      "description": "Financial goals within a household"
+    },
+    "/households/{householdId}/recurring/{recurringId}": {
+      "schema": "RecurringTransaction",
+      "description": "Recurring transaction templates"
+    }
+  }
+}

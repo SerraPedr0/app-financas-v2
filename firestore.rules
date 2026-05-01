@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Role-based helper: Is user a member of the household?
+    function isHouseholdMember(householdId) {
+      return isSignedIn() && exists(/databases/$(database)/documents/households/$(householdId)) &&
+             request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.memberIds;
+    }
+
+    // --- User Profiles ---
+    match /users/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn() && request.auth.uid == userId && 
+                    incoming().uid == userId &&
+                    incoming().keys().hasAll(['uid', 'email', 'displayName', 'householdId', 'createdAt']) &&
+                    incoming().keys().size() == 5;
+      allow update: if isSignedIn() && request.auth.uid == userId &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'householdId']);
+    }
+
+    // --- Households ---
+    match /households/{householdId} {
+      allow read: if isSignedIn() && request.auth.uid in existing().memberIds;
+      allow create: if isSignedIn() && 
+                    incoming().createdBy == request.auth.uid &&
+                    request.auth.uid in incoming().memberIds &&
+                    incoming().memberIds.size() <= 2; // Hard limit for "pair" as requested
+      allow update: if isSignedIn() && request.auth.uid in existing().memberIds &&
+                    (
+                      // Action: Add member
+                      (incoming().memberIds.size() <= 2 && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds'])) ||
+                      // Action: Rename
+                      (incoming().diff(existing()).affectedKeys().hasOnly(['name']))
+                    );
+    }
+
+    // --- Shared Data Subcollections ---
+    match /households/{householdId}/transactions/{transactionId} {
+      allow read: if isHouseholdMember(householdId) && (
+                    existing().scope == 'shared' || existing().userId == request.auth.uid
+                  );
+      allow create: if isHouseholdMember(householdId) && 
+                    incoming().userId == request.auth.uid &&
+                    incoming().amount is number &&
+                    incoming().type in ['income', 'expense'] &&
+                    incoming().scope in ['personal', 'shared'];
+      allow update: if isHouseholdMember(householdId) &&
+                    existing().userId == request.auth.uid; // Only the owner can edit their transactions (shared or personal)
+      allow delete: if isHouseholdMember(householdId) && 
+                    existing().userId == request.auth.uid;
+    }
+
+    match /households/{householdId}/goals/{goalId} {
+      allow read: if isHouseholdMember(householdId);
+      allow write: if isHouseholdMember(householdId);
+    }
+
+    match /households/{householdId}/recurring/{recurringId} {
+      allow read: if isHouseholdMember(householdId);
+      allow write: if isHouseholdMember(householdId);
+    }
+  }
+}
