@@ -53,40 +53,41 @@ service cloud.firestore {
     // --- Households (Shared Groups) ---
     match /households/{householdId} {
       allow get: if isSignedIn();
-      allow list: if isSignedIn() && resource.data.memberIds.hasAny([request.auth.uid]);
+      allow list: if isSignedIn() && (resource.data.memberIds.hasAny([request.auth.uid]) || resource.data.createdBy == request.auth.uid);
       allow create: if isSignedIn();
       allow update: if isSignedIn() && (
                       resource.data.memberIds.hasAny([request.auth.uid]) ||
                       resource.data.createdBy == request.auth.uid ||
+                      // Allow joining if there's a deterministic pending invitation
                       (
-                        // Allow joining if there's a deterministic pending invitation
                         exists(/databases/$(database)/documents/invitations/$(request.auth.uid + "_" + householdId)) &&
-                        get(/databases/$(database)/documents/invitations/$(request.auth.uid + "_" + householdId)).data.status == 'pending' &&
-                        request.resource.data.memberIds.hasAll(resource.data.memberIds) &&
-                        request.resource.data.memberIds.hasAny([request.auth.uid])
+                        get(/databases/$(database)/documents/invitations/$(request.auth.uid + "_" + householdId)).data.status == 'pending'
                       )
                     );
-      allow delete: if isSignedIn() && resource.data.memberIds.hasAny([request.auth.uid]);
+      allow delete: if isSignedIn() && resource.data.createdBy == request.auth.uid;
 
       match /transactions/{transactionId} {
-        allow read: if isSignedIn();
-        allow create: if isSignedIn() && incoming().userId == request.auth.uid;
-        allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+        allow read: if isHouseholdMember(householdId);
+        allow create: if isHouseholdMember(householdId) && incoming().userId == request.auth.uid;
+        // Allow deletion by creator OR by household admin (creator of household)
+        allow update, delete: if isHouseholdMember(householdId) && (
+          resource.data.userId == request.auth.uid || 
+          get(/databases/$(database)/documents/households/$(householdId)).data.createdBy == request.auth.uid
+        );
       }
       match /goals/{goalId} {
-        allow read: if isSignedIn();
-        allow write: if isSignedIn() && isHouseholdMember(householdId);
+        allow read: if isHouseholdMember(householdId);
+        allow write: if isHouseholdMember(householdId);
       }
       match /recurring/{recurringId} {
-        allow read: if isSignedIn();
-        allow write: if isSignedIn() && isHouseholdMember(householdId);
+        allow read: if isHouseholdMember(householdId);
+        allow write: if isHouseholdMember(householdId);
       }
     }
 
     match /invitations/{invitationId} {
-      allow read: if isSignedIn() && resource.data.invitedUserId == request.auth.uid;
+      allow read, update, delete: if isSignedIn() && resource.data.invitedUserId == request.auth.uid;
       allow create: if isSignedIn() && isHouseholdMember(incoming().householdId);
-      allow update, delete: if isSignedIn() && resource.data.invitedUserId == request.auth.uid;
     }
   }
 }

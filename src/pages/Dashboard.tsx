@@ -49,7 +49,9 @@ export const Dashboard: React.FC = () => {
     category: 'Alimentação',
     description: '',
     date: format(new Date(), 'yyyy-MM-dd'),
-    notes: ''
+    notes: '',
+    isEqualSplit: true,
+    splits: [] as { userId: string, userName: string, amount: string }[]
   });
 
   const [recurringFormData, setRecurringFormData] = useState({
@@ -205,12 +207,33 @@ export const Dashboard: React.FC = () => {
       ? `households/${profile.householdId}/transactions`
       : `users/${user.uid}/transactions`;
 
+    // Process splits if shared and expense
+    let finalSplits = undefined;
+    if (isShared && formData.type === 'expense' && groupMembers.length > 0) {
+      const totalAmount = parseFloat(formData.amount);
+      if (formData.isEqualSplit) {
+        const splitAmount = totalAmount / groupMembers.length;
+        finalSplits = groupMembers.map(m => ({
+          userId: m.uid,
+          userName: m.displayName,
+          amount: splitAmount
+        }));
+      } else {
+        finalSplits = formData.splits.map(s => ({
+          userId: s.userId,
+          userName: s.userName,
+          amount: parseFloat(s.amount) || 0
+        }));
+      }
+    }
+
     try {
       await addDoc(collection(db, path), {
         ...formData,
         amount: parseFloat(formData.amount),
         userId: user.uid,
         userName: profile.displayName,
+        splits: finalSplits,
         createdAt: serverTimestamp()
       });
       setIsModalOpen(false);
@@ -221,7 +244,9 @@ export const Dashboard: React.FC = () => {
         category: 'Alimentação',
         description: '',
         date: format(new Date(), 'yyyy-MM-dd'),
-        notes: ''
+        notes: '',
+        isEqualSplit: true,
+        splits: []
       });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, path);
@@ -344,21 +369,42 @@ export const Dashboard: React.FC = () => {
 
   const handleAcceptInvitation = async (invitation: Invitation) => {
     if (!user) return;
+    
+    if (profile?.householdId) {
+      if (!window.confirm('Você já faz parte de um grupo. Para aceitar este convite, você sairá do grupo atual. Continuar?')) {
+        return;
+      }
+    }
+
     setIsInviteLoading(true);
     try {
       const batch = writeBatch(db);
 
-      // 1. Join new household
+      // 1. If was in previous household, remove from it
+      if (profile?.householdId) {
+        const oldHouseholdRef = doc(db, 'households', profile.householdId);
+        const oldHouseholdSnap = await getDoc(oldHouseholdRef);
+        if (oldHouseholdSnap.exists()) {
+          const oldMembers = (oldHouseholdSnap.data() as Household).memberIds.filter(id => id !== user.uid);
+          if (oldMembers.length === 0 && oldHouseholdSnap.data().createdBy === user.uid) {
+            batch.delete(oldHouseholdRef);
+          } else {
+            batch.update(oldHouseholdRef, { memberIds: oldMembers });
+          }
+        }
+      }
+
+      // 2. Join new household
       batch.update(doc(db, 'households', invitation.householdId), {
         memberIds: arrayUnion(user.uid)
       });
 
-      // 2. Update user profile
+      // 3. Update user profile
       batch.update(doc(db, 'users', user.uid), {
         householdId: invitation.householdId
       });
 
-      // 3. Mark invitation as accepted
+      // 4. Mark invitation as accepted
       batch.update(doc(db, 'invitations', invitation.id!), {
         status: 'accepted'
       });
@@ -367,7 +413,7 @@ export const Dashboard: React.FC = () => {
       alert('Você entrou no novo grupo!');
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'invitations/households');
-      alert('Erro ao aceitar convite. Verifique sua conexão.');
+      alert('Erro ao aceitar convite. Verifique se o convite ainda é válido.');
     } finally {
       setIsInviteLoading(false);
     }
@@ -1137,16 +1183,31 @@ export const Dashboard: React.FC = () => {
                   <section className="space-y-4 p-6 bg-rose-50/30 rounded-3xl border border-rose-100">
                     <div className="flex items-center gap-3 mb-2">
                       <LogOut className="w-5 h-5 text-rose-600" />
-                      <h4 className="font-bold text-zinc-900 font-mono text-xs uppercase tracking-widest">Zona de Perigo</h4>
+                      <h4 className="font-bold text-zinc-900 font-mono text-xs uppercase tracking-widest">Sessão e Grupo</h4>
                     </div>
-                    <p className="text-xs text-zinc-500 leading-relaxed">Ao sair, você voltará para o espaço 100% individual. Suas finanças compartilhadas continuarão disponíveis no grupo para os demais membros.</p>
-                    <button 
-                      onClick={handleLeaveGroup}
-                      disabled={isInviteLoading}
-                      className="w-full py-3 bg-rose-600 text-white rounded-xl font-black uppercase tracking-widest text-[10px] hover:bg-rose-700 transition-all shadow-lg shadow-rose-600/20"
-                    >
-                      {isInviteLoading ? 'Saindo...' : 'Sair Deste Grupo'}
-                    </button>
+                    <p className="text-xs text-zinc-500 leading-relaxed">Gerencie sua participação no grupo ou saia da sua conta.</p>
+                    
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {profile?.householdId && (
+                        <button 
+                          onClick={handleLeaveGroup}
+                          disabled={isInviteLoading}
+                          className="py-3 bg-white text-rose-600 border border-rose-200 rounded-xl font-black uppercase tracking-widest text-[10px] hover:bg-rose-50 transition-all"
+                        >
+                          {isInviteLoading ? 'Saindo...' : 'Sair do Grupo'}
+                        </button>
+                      )}
+                      <button 
+                        onClick={() => {
+                          if (window.confirm('Deseja realmente sair da conta?')) {
+                            auth.signOut();
+                          }
+                        }}
+                        className="py-3 bg-zinc-900 text-white rounded-xl font-black uppercase tracking-widest text-[10px] hover:bg-zinc-800 transition-all shadow-lg"
+                      >
+                        Sair da Conta
+                      </button>
+                    </div>
                   </section>
                 </div>
               )}
@@ -1157,11 +1218,11 @@ export const Dashboard: React.FC = () => {
 
       {/* Mobile Navbar */}
       <nav className="md:hidden fixed bottom-6 left-6 right-6 h-16 bg-zinc-900 text-white rounded-2xl flex items-center justify-around px-4 shadow-2xl z-20">
-        <button onClick={() => setActiveTab('overview')} className={cn("p-2", activeTab === 'overview' ? "text-white" : "text-zinc-500")}><PieChartIcon className="w-6 h-6" /></button>
-        <button onClick={() => setActiveTab('transactions')} className={cn("p-2", activeTab === 'transactions' ? "text-white" : "text-zinc-500")}><CalendarClock className="w-6 h-6" /></button>
-        <button onClick={() => setIsModalOpen(true)} className="bg-white text-zinc-900 p-3 rounded-xl shadow-xl -mt-8 border-4 border-zinc-50"><Plus className="w-6 h-6" /></button>
-        <button onClick={() => setActiveTab('goals')} className={cn("p-2", activeTab === 'goals' ? "text-white" : "text-zinc-500")}><Target className="w-6 h-6" /></button>
-        <button onClick={() => auth.signOut()} className="p-2 text-zinc-500"><User className="w-6 h-6" /></button>
+        <button onClick={() => setActiveTab('overview')} className={cn("p-2", activeTab === 'overview' ? "text-white" : "text-zinc-500")} title="Visão Geral"><PieChartIcon className="w-6 h-6" /></button>
+        <button onClick={() => setActiveTab('transactions')} className={cn("p-2", activeTab === 'transactions' ? "text-white" : "text-zinc-500")} title="Transações"><CalendarClock className="w-6 h-6" /></button>
+        <button onClick={() => setIsModalOpen(true)} className="bg-white text-zinc-900 p-3 rounded-xl shadow-xl -mt-8 border-4 border-zinc-50" title="Novo Lançamento"><Plus className="w-6 h-6" /></button>
+        <button onClick={() => setActiveTab('goals')} className={cn("p-2", activeTab === 'goals' ? "text-white" : "text-zinc-500")} title="Metas"><Target className="w-6 h-6" /></button>
+        <button onClick={() => setActiveTab('group')} className={cn("p-2", activeTab === 'group' ? "text-white" : "text-zinc-500")} title="Grupo"><User className="w-6 h-6" /></button>
       </nav>
 
       {/* Modal - Nova Transação */}
@@ -1181,7 +1242,7 @@ export const Dashboard: React.FC = () => {
                 <h3 className="text-xl font-bold">Nova Transação</h3>
                 <button onClick={() => setIsModalOpen(false)} className="text-white/60 hover:text-white transition-colors">Voltar</button>
               </div>
-              <form onSubmit={handleAddTransaction} className="p-8 space-y-4">
+              <form onSubmit={handleAddTransaction} className="p-8 space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar">
                 <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-100 rounded-2xl">
                   {(['expense', 'income'] as const).map((type) => (
                     <button
@@ -1219,6 +1280,64 @@ export const Dashboard: React.FC = () => {
                     ))}
                   </div>
                 </div>
+
+                {formData.scope === 'shared' && formData.type === 'expense' && groupMembers.length > 0 && (
+                  <div className="p-4 bg-zinc-50 rounded-2xl border border-zinc-200 animate-in fade-in slide-in-from-top-2">
+                    <div className="flex items-center justify-between mb-4">
+                      <label className="text-xs font-black text-zinc-900 uppercase tracking-widest">Divisão de Gastos</label>
+                      <button 
+                        type="button"
+                        onClick={() => setFormData({ ...formData, isEqualSplit: !formData.isEqualSplit })}
+                        className="text-[10px] font-black text-indigo-600 uppercase hover:underline"
+                      >
+                        {formData.isEqualSplit ? 'Personalizar' : 'Dividir Igual'}
+                      </button>
+                    </div>
+
+                    {formData.isEqualSplit ? (
+                      <p className="text-[10px] text-zinc-500 italic">O valor de {formatCurrency(parseFloat(formData.amount) || 0)} será dividido igualmente entre {groupMembers.length} membros ({formatCurrency((parseFloat(formData.amount) || 0) / groupMembers.length)} cada).</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {groupMembers.map(member => {
+                          const currentSplit = formData.splits.find(s => s.userId === member.uid) || { userId: member.uid, userName: member.displayName, amount: '' };
+                          return (
+                            <div key={member.uid} className="flex items-center justify-between gap-4">
+                              <span className="text-xs font-bold text-zinc-700 truncate">{member.displayName}</span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] text-zinc-400 font-mono">R$</span>
+                                <input 
+                                  type="number"
+                                  placeholder="0,00"
+                                  value={currentSplit.amount}
+                                  onChange={(e) => {
+                                    const newSplits = [...formData.splits];
+                                    const index = newSplits.findIndex(s => s.userId === member.uid);
+                                    if (index >= 0) {
+                                      newSplits[index].amount = e.target.value;
+                                    } else {
+                                      newSplits.push({ userId: member.uid, userName: member.displayName, amount: e.target.value });
+                                    }
+                                    setFormData({ ...formData, splits: newSplits });
+                                  }}
+                                  className="w-20 px-2 py-1 bg-white border border-zinc-200 rounded-lg text-xs font-bold outline-none focus:ring-1 focus:ring-zinc-900"
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                        <div className="pt-2 border-t border-zinc-200 flex justify-between items-center">
+                          <span className="text-[10px] font-black uppercase text-zinc-400">Total Definido</span>
+                          <span className={cn(
+                            "text-xs font-bold font-mono",
+                            Math.abs(formData.splits.reduce((acc, s) => acc + (parseFloat(s.amount) || 0), 0) - (parseFloat(formData.amount) || 0)) < 0.01 ? "text-emerald-600" : "text-rose-600"
+                          )}>
+                            {formatCurrency(formData.splits.reduce((acc, s) => acc + (parseFloat(s.amount) || 0), 0))}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="space-y-4">
                    <div>

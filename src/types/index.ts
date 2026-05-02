@@ -21,6 +21,12 @@ export interface AppNotification {
   data?: any;
 }
 
+export interface TransactionSplit {
+  userId: string;
+  userName: string;
+  amount: number;
+}
+
 export interface Transaction {
   id?: string;
   amount: number;
@@ -32,6 +38,7 @@ export interface Transaction {
   userId: string;
   userName: string;
   notes?: string;
+  splits?: TransactionSplit[];
   createdAt: string;
 }
 
@@ -54,6 +61,8 @@ export interface RecurringTransaction {
   description: string;
   dayOfMonth: number;
   userId: string;
+  userName: string;
+  splits?: TransactionSplit[];
   lastProcessed?: string;
 }
 
