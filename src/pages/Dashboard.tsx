@@ -22,8 +22,10 @@ export const Dashboard: React.FC = () => {
   const { profile, user } = useAuth();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
+  const [recurring, setRecurring] = useState<RecurringTransaction[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'goals'>('overview');
+  const [isRecurringModalOpen, setIsRecurringModalOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'goals' | 'recurring'>('overview');
   
   // Form State
   const [formData, setFormData] = useState({
@@ -34,6 +36,14 @@ export const Dashboard: React.FC = () => {
     description: '',
     date: format(new Date(), 'yyyy-MM-dd'),
     notes: ''
+  });
+
+  const [recurringFormData, setRecurringFormData] = useState({
+    amount: '',
+    type: 'expense' as 'income' | 'expense',
+    category: 'Moradia',
+    description: '',
+    dayOfMonth: '1'
   });
 
   const [dashboardFilter, setDashboardFilter] = useState<'all' | 'personal' | 'shared'>('all');
@@ -68,9 +78,19 @@ export const Dashboard: React.FC = () => {
       handleFirestoreError(error, OperationType.GET, goalsPath);
     });
 
+    const recurringPath = `households/${profile.householdId}/recurring`;
+    const qRecurring = query(collection(db, recurringPath));
+    const unsubRecurring = onSnapshot(qRecurring, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as RecurringTransaction[];
+      setRecurring(data);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, recurringPath);
+    });
+
     return () => {
       unsubTransactions();
       unsubGoals();
+      unsubRecurring();
     };
   }, [profile?.householdId, user?.uid]);
 
@@ -102,6 +122,33 @@ export const Dashboard: React.FC = () => {
     }
   };
 
+  const handleAddRecurring = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!profile?.householdId || !user) return;
+
+    const path = `households/${profile.householdId}/recurring`;
+    try {
+      await addDoc(collection(db, path), {
+        ...recurringFormData,
+        amount: parseFloat(recurringFormData.amount),
+        dayOfMonth: parseInt(recurringFormData.dayOfMonth),
+        userId: user.uid,
+        userName: profile.displayName,
+        createdAt: serverTimestamp()
+      });
+      setIsRecurringModalOpen(false);
+      setRecurringFormData({
+        amount: '',
+        type: 'expense',
+        category: 'Moradia',
+        description: '',
+        dayOfMonth: '1'
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  };
+
   const deleteTransaction = async (id: string) => {
     if (!profile?.householdId || !window.confirm('Excluir esta transação?')) return;
     const path = `households/${profile.householdId}/transactions/${id}`;
@@ -109,6 +156,23 @@ export const Dashboard: React.FC = () => {
       await deleteDoc(doc(db, path));
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, path);
+    }
+  };
+
+  const deleteRecurring = async (id: string) => {
+    if (!profile?.householdId || !window.confirm('Excluir esta conta fixa?')) return;
+    const path = `households/${profile.householdId}/recurring/${id}`;
+    try {
+      await deleteDoc(doc(db, path));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
+  };
+
+  const copyHouseholdId = () => {
+    if (profile?.householdId) {
+      navigator.clipboard.writeText(profile.householdId);
+      alert('ID do Grupo copiado para a área de transferência!');
     }
   };
 
@@ -173,7 +237,12 @@ export const Dashboard: React.FC = () => {
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate">{profile?.displayName}</p>
-              <p className="text-xs text-zinc-500 truncate uppercase font-mono">{profile?.householdId}</p>
+              <button 
+                onClick={copyHouseholdId}
+                className="text-xs text-zinc-500 truncate hover:text-zinc-300 transition-colors flex items-center gap-1 uppercase font-mono"
+              >
+                ID: {profile?.householdId} <MoreVertical className="w-3 h-3" />
+              </button>
             </div>
           </div>
           <button 
@@ -486,17 +555,41 @@ export const Dashboard: React.FC = () => {
               <div>
                 <h4 className="font-bold text-amber-900">Programar Lançamentos</h4>
                 <p className="text-amber-800 text-sm opacity-80">
-                  Configure contas que se repetem todo mês para que o sistema as lance automaticamente.
-                  Útil para Aluguel, Academias e Assinaturas.
+                  Configure contas que se repetem todo mês. Use isto para Aluguel, Academias e Assinaturas.
                 </p>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-               <div className="bg-white p-8 rounded-3xl border-2 border-dashed border-zinc-200 flex flex-col items-center justify-center text-zinc-400 min-h-[200px]">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+               <button 
+                onClick={() => setIsRecurringModalOpen(true)}
+                className="bg-white p-8 rounded-3xl border-2 border-dashed border-zinc-200 flex flex-col items-center justify-center text-zinc-400 min-h-[200px] hover:border-zinc-900 hover:text-zinc-900 transition-all"
+               >
                   <Plus className="w-8 h-8 mb-2" />
                   <p className="font-bold">Nova Conta Recorrente</p>
-               </div>
+               </button>
+
+               {recurring.map(item => (
+                 <div key={item.id} className="bg-white p-6 rounded-3xl border border-zinc-200 shadow-sm relative group">
+                    <button 
+                      onClick={() => deleteRecurring(item.id!)}
+                      className="absolute top-4 right-4 p-2 text-zinc-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                    <div className={cn(
+                      "w-12 h-12 rounded-2xl flex items-center justify-center mb-4 font-bold text-xl",
+                      item.type === 'expense' ? "bg-rose-50 text-rose-600" : "bg-emerald-50 text-emerald-600"
+                    )}>
+                      {item.description[0].toUpperCase()}
+                    </div>
+                    <h4 className="font-bold text-zinc-900 mb-1">{item.description}</h4>
+                    <p className="text-zinc-500 text-sm mb-4">{item.category} • Dia {item.dayOfMonth}</p>
+                    <p className={cn("text-xl font-bold", item.type === 'expense' ? "text-rose-600" : "text-emerald-600")}>
+                      {formatCurrency(item.amount)}
+                    </p>
+                 </div>
+               ))}
             </div>
           </div>
         )}
@@ -639,6 +732,110 @@ export const Dashboard: React.FC = () => {
                   className="w-full py-4 bg-zinc-900 text-white rounded-2xl font-bold shadow-xl hover:bg-zinc-800 transition-all active:scale-[0.98] mt-4"
                 >
                   Salvar Lançamento
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Modal - Nova Conta Fixa */}
+      <AnimatePresence>
+        {isRecurringModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => setIsRecurringModalOpen(false)}
+              className="absolute inset-0 bg-zinc-900/40 backdrop-blur-sm" 
+            />
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 20 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              className="relative w-full max-w-lg bg-white rounded-3xl shadow-2xl overflow-hidden shadow-zinc-900/20"
+            >
+              <div className="bg-amber-600 p-6 text-white flex items-center justify-between">
+                <h3 className="text-xl font-bold">Nova Conta Fixa</h3>
+                <button onClick={() => setIsRecurringModalOpen(false)} className="text-white/60 hover:text-white transition-colors">Voltar</button>
+              </div>
+              <form onSubmit={handleAddRecurring} className="p-8 space-y-4">
+                <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-100 rounded-2xl">
+                  {(['expense', 'income'] as const).map((type) => (
+                    <button
+                      key={type}
+                      type="button"
+                      onClick={() => setRecurringFormData({ ...recurringFormData, type })}
+                      className={cn(
+                        "py-3 rounded-xl font-bold text-sm transition-all capitalize",
+                        recurringFormData.type === type ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                      )}
+                    >
+                      {type === 'expense' ? 'Despesa' : 'Receita'}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="space-y-4">
+                   <div>
+                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Valor Mensal (R$)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={recurringFormData.amount}
+                      onChange={(e) => setRecurringFormData({ ...recurringFormData, amount: e.target.value })}
+                      placeholder="0,00"
+                      className="w-full text-4xl font-bold bg-transparent border-b-2 border-zinc-100 focus:border-amber-600 outline-none pb-2 transition-all"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Dia do Vencimento</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="31"
+                        required
+                        value={recurringFormData.dayOfMonth}
+                        onChange={(e) => setRecurringFormData({ ...recurringFormData, dayOfMonth: e.target.value })}
+                        className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-amber-600"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Categoria</label>
+                      <select
+                        value={recurringFormData.category}
+                        onChange={(e) => setRecurringFormData({ ...recurringFormData, category: e.target.value })}
+                        className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-amber-600 appearance-none"
+                      >
+                        <option>Moradia</option>
+                        <option>Assinaturas</option>
+                        <option>Saúde</option>
+                        <option>Educação</option>
+                        <option>Aluguel</option>
+                        <option>Internet</option>
+                        <option>Energia</option>
+                        <option>Outros</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Descrição</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Netflix, Aluguel do Ap..."
+                      value={recurringFormData.description}
+                      onChange={(e) => setRecurringFormData({ ...recurringFormData, description: e.target.value })}
+                      className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-amber-600"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-4 bg-amber-600 text-white rounded-2xl font-bold shadow-xl hover:bg-amber-700 transition-all active:scale-[0.98] mt-4"
+                >
+                  Salvar Conta Fixa
                 </button>
               </form>
             </motion.div>
