@@ -741,6 +741,23 @@ export const Dashboard: React.FC = () => {
       }, {} as Record<string, number>)
   ).map(([name, value]) => ({ name, value }));
 
+  const CATEGORY_COLORS: Record<string, string> = {
+    'Alimentação': '#fbbf24', // Amber
+    'Transporte': '#60a5fa', // Blue
+    'Lazer': '#f87171', // Red
+    'Moradia': '#818cf8', // Indigo
+    'Saúde': '#34d399', // Emerald
+    'Mercado': '#fb923c', // Orange
+    'Serviços': '#a78bfa', // Violet
+    'Outros': '#94a3b8', // Slate
+    'Educação': '#2dd4bf', // Teal
+    'Vestuário': '#f472b6', // Pink
+  };
+
+  const getCategoryColor = (index: number, category: string) => {
+    return CATEGORY_COLORS[category] || ['#18181b', '#3f3f46', '#71717a', '#a1a1aa', '#d4d4d8'][index % 5];
+  };
+
   const COLORS = ['#18181b', '#3f3f46', '#71717a', '#a1a1aa', '#d4d4d8'];
 
   // Calculate daily data for Line Chart
@@ -831,7 +848,7 @@ export const Dashboard: React.FC = () => {
       </aside>
 
       {/* Main Content */}
-      <main className="md:ml-64 p-4 md:p-8 w-full">
+      <main className="md:ml-64 p-4 md:p-8">
         <header className="flex flex-col lg:flex-row lg:items-center justify-between mb-8 gap-6">
           <div className="flex flex-col sm:flex-row sm:items-center gap-6">
             <div>
@@ -1054,7 +1071,7 @@ export const Dashboard: React.FC = () => {
                           dataKey="value"
                         >
                           {categoryData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                            <Cell key={`cell-${index}`} fill={getCategoryColor(index, entry.name)} />
                           ))}
                         </Pie>
                         <Tooltip formatter={(value: number) => formatCurrency(value)} />
@@ -1064,7 +1081,7 @@ export const Dashboard: React.FC = () => {
                   <div className="grid grid-cols-2 gap-2 mt-4">
                     {categoryData.slice(0, 4).map((c, i) => (
                       <div key={c.name} className="flex items-center gap-2 text-[10px] font-bold text-zinc-500 uppercase">
-                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: getCategoryColor(i, c.name) }} />
                         <span className="truncate">{c.name}</span>
                       </div>
                     ))}
@@ -2172,9 +2189,37 @@ export const Dashboard: React.FC = () => {
                       onChange={(e) => setNewPhotoUrl(e.target.value)}
                       placeholder="https://exemplo.com/foto.jpg"
                       className="w-full mt-2 p-4 bg-zinc-50 border border-zinc-200 rounded-2xl focus:ring-2 focus:ring-zinc-900 focus:outline-none text-zinc-900 shadow-inner"
-                      required
                     />
                   </div>
+                  
+                  <div className="relative">
+                    <div className="absolute inset-0 flex items-center">
+                      <span className="w-full border-t border-zinc-200" />
+                    </div>
+                    <div className="relative flex justify-center text-xs uppercase">
+                      <span className="bg-white px-2 text-zinc-400">ou upload de arquivo</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onloadend = () => {
+                            setNewPhotoUrl(reader.result as string);
+                          };
+                          reader.readAsDataURL(file);
+                        }
+                      }}
+                      className="w-full text-sm text-zinc-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-zinc-100 file:text-zinc-700 hover:file:bg-zinc-200"
+                    />
+                    <p className="mt-2 text-[10px] text-zinc-400 text-center italic">Sugestão: Use arquivos pequenos para melhor performance.</p>
+                  </div>
+
                   <button 
                     type="submit"
                     className="w-full py-4 bg-zinc-900 text-white rounded-2xl font-bold shadow-xl hover:bg-zinc-800 transition-all active:scale-[0.98]"
