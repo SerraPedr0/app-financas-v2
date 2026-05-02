@@ -27,22 +27,64 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // Role-based helper: Is user a member is the household?
+    // Role-based helper: Is user a member of the household?
     function isHouseholdMember(householdId) {
-      return isSignedIn() && 
-             get(/databases/$(database)/documents/households/$(householdId)).data.memberIds.hasAny([request.auth.uid]);
+      return isSignedIn() && (
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.householdId == householdId ||
+        (exists(/databases/$(database)/documents/households/$(householdId)) &&
+         get(/databases/$(database)/documents/households/$(householdId)).data.memberIds.hasAny([request.auth.uid]))
+      );
+    }
+
+    // Validation Helpers
+    function isValidUser(data) {
+      return data.keys().hasAll(['displayName', 'email', 'uid', 'createdAt']) &&
+             data.displayName is string && data.displayName.size() <= 100 &&
+             data.email is string && data.email.size() <= 100 &&
+             data.uid == request.auth.uid;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['amount', 'type', 'category', 'description', 'date', 'userId', 'userName', 'createdAt', 'memberIds']) &&
+             data.amount is number &&
+             data.type in ['income', 'expense'] &&
+             data.category is string && data.category.size() <= 50 &&
+             data.date is string && data.date.size() <= 20 &&
+             data.userId == request.auth.uid &&
+             data.memberIds is list;
+    }
+
+    function isValidHousehold(data) {
+      return data.keys().hasAll(['name', 'createdBy', 'memberIds', 'createdAt']) &&
+             data.name is string && data.name.size() <= 100 &&
+             data.memberIds is list && data.memberIds.size() <= 10;
+    }
+
+    function isValidInvitation(data) {
+      return data.keys().hasAll(['householdId', 'householdName', 'invitedByEmail', 'invitedByName', 'invitedByUserId', 'invitedUserId', 'status', 'createdAt', 'memberIds', 'invitedUserEmail']) &&
+             data.status in ['pending', 'accepted', 'declined'] &&
+             data.invitedByUserId == request.auth.uid;
     }
 
     // --- User Profiles ---
     match /users/{userId} {
-      allow get, list: if isSignedIn();
-      allow create: if isOwner(userId);
-      allow update: if isOwner(userId) || (existing().householdId != null && isHouseholdMember(existing().householdId));
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['householdId', 'displayName', 'photoURL'])
+      );
     }
 
     match /users/{userId}/transactions/{id} {
-      allow read, write: if isOwner(userId);
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidTransaction(incoming());
+      allow update: if isOwner(userId) && isValidTransaction(incoming()) && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['amount', 'category', 'description', 'date', 'notes', 'type', 'scope'])
+      );
+      allow delete: if isOwner(userId);
     }
+    
     match /users/{userId}/goals/{id} {
       allow read, write: if isOwner(userId);
     }
@@ -54,40 +96,56 @@ service cloud.firestore {
     match /households/{householdId} {
       allow get: if isSignedIn();
       allow list: if isSignedIn() && (resource.data.memberIds.hasAny([request.auth.uid]) || resource.data.createdBy == request.auth.uid);
-      allow create: if isSignedIn();
+      allow create: if isSignedIn() && isValidHousehold(incoming());
       allow update: if isSignedIn() && (
-                      resource.data.memberIds.hasAny([request.auth.uid]) ||
-                      resource.data.createdBy == request.auth.uid ||
-                      // Allow joining if there's a deterministic pending invitation
+                      ( (resource.data.memberIds.hasAny([request.auth.uid]) || resource.data.createdBy == request.auth.uid) && 
+                        incoming().memberIds.size() <= 10 && 
+                        incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'name']) ) ||
+                      // Action: Join via invitation
                       (
                         exists(/databases/$(database)/documents/invitations/$(request.auth.uid + "_" + householdId)) &&
-                        get(/databases/$(database)/documents/invitations/$(request.auth.uid + "_" + householdId)).data.status == 'pending'
+                        (get(/databases/$(database)/documents/invitations/$(request.auth.uid + "_" + householdId)).data.status == 'pending' ||
+                         getAfter(/databases/$(database)/documents/invitations/$(request.auth.uid + "_" + householdId)).data.status == 'accepted') &&
+                        incoming().memberIds.hasAny([request.auth.uid]) &&
+                        incoming().diff(existing()).affectedKeys().hasOnly(['memberIds'])
                       )
                     );
       allow delete: if isSignedIn() && resource.data.createdBy == request.auth.uid;
 
       match /transactions/{transactionId} {
         allow read: if isHouseholdMember(householdId);
-        allow create: if isHouseholdMember(householdId) && incoming().userId == request.auth.uid;
-        // Allow deletion by creator OR by household admin (creator of household)
-        allow update, delete: if isHouseholdMember(householdId) && (
-          resource.data.userId == request.auth.uid || 
+        allow create: if isHouseholdMember(householdId) && isValidTransaction(incoming());
+        allow update: if isHouseholdMember(householdId) && (
+          incoming().userId == request.auth.uid ||
+          get(/databases/$(database)/documents/households/$(householdId)).data.createdBy == request.auth.uid
+        ) && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['amount', 'category', 'description', 'date', 'notes', 'splits', 'type', 'scope', 'memberIds'])
+        );
+        allow delete: if isHouseholdMember(householdId) && (
+          existing().userId == request.auth.uid ||
           get(/databases/$(database)/documents/households/$(householdId)).data.createdBy == request.auth.uid
         );
       }
       match /goals/{goalId} {
-        allow read: if isHouseholdMember(householdId);
-        allow write: if isHouseholdMember(householdId);
+        allow read, write: if isHouseholdMember(householdId);
       }
       match /recurring/{recurringId} {
-        allow read: if isHouseholdMember(householdId);
-        allow write: if isHouseholdMember(householdId);
+        allow read, write: if isHouseholdMember(householdId);
       }
     }
 
     match /invitations/{invitationId} {
-      allow read, update, delete: if isSignedIn() && resource.data.invitedUserId == request.auth.uid;
-      allow create: if isSignedIn() && isHouseholdMember(incoming().householdId);
+      allow read: if isSignedIn() && (
+        resource.data.invitedUserId == request.auth.uid ||
+        resource.data.invitedByUserId == request.auth.uid ||
+        resource.data.memberIds.hasAny([request.auth.uid])
+      );
+      allow update: if isSignedIn() && (
+        ( resource.data.invitedUserId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status']) ) ||
+        ( resource.data.invitedByUserId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status']) )
+      );
+      allow delete: if isSignedIn() && (resource.data.invitedUserId == request.auth.uid || resource.data.invitedByUserId == request.auth.uid);
+      allow create: if isSignedIn() && isHouseholdMember(incoming().householdId) && isValidInvitation(incoming());
     }
   }
 }

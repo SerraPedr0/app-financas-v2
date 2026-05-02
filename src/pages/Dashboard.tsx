@@ -39,6 +39,7 @@ export const Dashboard: React.FC = () => {
   const [inviteError, setInviteError] = useState('');
   const [joinCode, setJoinCode] = useState('');
   const [invitations, setInvitations] = useState<Invitation[]>([]);
+  const [sentInvitations, setSentInvitations] = useState<Invitation[]>([]);
   const [groupMembers, setGroupMembers] = useState<UserProfile[]>([]);
 
   // Form State
@@ -100,6 +101,8 @@ export const Dashboard: React.FC = () => {
         const shared = prev.filter(g => g.id?.includes('shared_')); // Simple way to mark shared
         return [...data, ...shared];
       });
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, personalGoalsPath);
     });
     unsubs.push(unsubPersonalGoals);
 
@@ -115,6 +118,8 @@ export const Dashboard: React.FC = () => {
         const sharedData = prev.filter(r => r.scope === 'shared');
         return [...personalData, ...sharedData];
       });
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, personalRecurringPath);
     });
     unsubs.push(unsubPersonalRecurring);
 
@@ -127,6 +132,8 @@ export const Dashboard: React.FC = () => {
         } else {
           setHousehold(null);
         }
+      }, (error) => {
+        handleFirestoreError(error, OperationType.GET, `households/${profile.householdId}`);
       });
       unsubs.push(unsubHousehold);
 
@@ -143,6 +150,8 @@ export const Dashboard: React.FC = () => {
           const personalData = prev.filter(t => t.scope === 'personal');
           return [...personalData, ...sharedData].sort((a, b) => b.date.localeCompare(a.date));
         });
+      }, (error) => {
+        handleFirestoreError(error, OperationType.GET, sharedTransactionsPath);
       });
       unsubs.push(unsubSharedTransactions);
 
@@ -158,6 +167,8 @@ export const Dashboard: React.FC = () => {
           const personalData = prev.filter(r => r.scope === 'personal');
           return [...personalData, ...sharedData];
         });
+      }, (error) => {
+        handleFirestoreError(error, OperationType.GET, sharedRecurringPath);
       });
       unsubs.push(unsubSharedRecurring);
     } else {
@@ -175,27 +186,49 @@ export const Dashboard: React.FC = () => {
     const unsubInvitations = onSnapshot(qInvitations, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Invitation[];
       setInvitations(data);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, invitationsPath);
     });
     unsubs.push(unsubInvitations);
+
+    // Fetch sent invitations for current household
+    if (profile?.householdId) {
+      const qSentInvitations = query(
+        collection(db, invitationsPath),
+        where('householdId', '==', profile.householdId),
+        where('status', '==', 'pending'),
+        where('memberIds', 'array-contains', user.uid) // Ensure user is a member of the invitation's recorded member list
+      );
+      const unsubSentInvitations = onSnapshot(qSentInvitations, (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Invitation[];
+        setSentInvitations(data);
+      }, (error) => {
+        // Log the error but don't necessarily crash the whole app if sent invitations fails
+        console.error("Error listening to sent invitations:", error);
+      });
+      unsubs.push(unsubSentInvitations);
+    } else {
+      setSentInvitations([]);
+    }
 
     return () => unsubs.forEach(unsub => unsub());
   }, [profile?.householdId, user?.uid]);
 
   useEffect(() => {
-    if (!household?.memberIds || household.memberIds.length === 0) return;
+    if (!household?.memberIds || household.memberIds.length === 0) {
+      setGroupMembers([]);
+      return;
+    }
     
-    const fetchMembers = async () => {
-      try {
-        const q = query(collection(db, 'users'), where('uid', 'in', household.memberIds));
-        const snapshot = await getDocs(q);
-        const members = snapshot.docs.map(doc => doc.data() as UserProfile);
-        setGroupMembers(members);
-      } catch (error) {
-        console.error("Error fetching group members:", error);
-      }
-    };
+    const q = query(collection(db, 'users'), where('uid', 'in', household.memberIds));
+    const unsubMembers = onSnapshot(q, (snapshot) => {
+      const members = snapshot.docs.map(doc => doc.data() as UserProfile);
+      setGroupMembers(members);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'users');
+    });
     
-    fetchMembers();
+    return () => unsubMembers();
   }, [household?.memberIds]);
 
   const handleAddTransaction = async (e: React.FormEvent) => {
@@ -210,20 +243,21 @@ export const Dashboard: React.FC = () => {
     // Process splits if shared and expense
     let finalSplits = undefined;
     if (isShared && formData.type === 'expense' && groupMembers.length > 0) {
-      const totalAmount = parseFloat(formData.amount);
-      if (formData.isEqualSplit) {
-        const splitAmount = totalAmount / groupMembers.length;
-        finalSplits = groupMembers.map(m => ({
-          userId: m.uid,
-          userName: m.displayName,
-          amount: splitAmount
-        }));
-      } else {
-        finalSplits = formData.splits.map(s => ({
-          userId: s.userId,
-          userName: s.userName,
-          amount: parseFloat(s.amount) || 0
-        }));
+      finalSplits = formData.splits.length > 0 
+        ? formData.splits.map(s => ({
+            userId: s.userId,
+            userName: s.userName,
+            amount: parseFloat(s.amount) || 0
+          }))
+        : groupMembers.map(m => ({
+            userId: m.uid,
+            userName: m.displayName,
+            amount: parseFloat(formData.amount) / groupMembers.length
+          }));
+      
+      const totalAmountFromSplits = finalSplits.reduce((acc, s) => acc + s.amount, 0);
+      if (totalAmountFromSplits > 0) {
+        formData.amount = totalAmountFromSplits.toString();
       }
     }
 
@@ -233,6 +267,7 @@ export const Dashboard: React.FC = () => {
         amount: parseFloat(formData.amount),
         userId: user.uid,
         userName: profile.displayName,
+        memberIds: isShared ? household?.memberIds : [user.uid],
         splits: finalSplits,
         createdAt: serverTimestamp()
       });
@@ -285,6 +320,7 @@ export const Dashboard: React.FC = () => {
         dayOfMonth: parseInt(recurringFormData.dayOfMonth),
         userId: user.uid,
         userName: profile.displayName,
+        memberIds: profile.householdId ? household?.memberIds : [user.uid],
         createdAt: serverTimestamp()
       });
       setIsRecurringModalOpen(false);
@@ -351,9 +387,12 @@ export const Dashboard: React.FC = () => {
       await setDoc(doc(db, 'invitations', invitationId), {
         householdId: profile.householdId,
         householdName: household.name,
+        memberIds: household.memberIds,
         invitedByEmail: user.email,
         invitedByName: profile.displayName,
+        invitedByUserId: user.uid,
         invitedUserId: invitedUserId,
+        invitedUserEmail: inviteEmail,
         status: 'pending',
         createdAt: serverTimestamp()
       });
@@ -644,7 +683,7 @@ export const Dashboard: React.FC = () => {
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate">{profile?.displayName}</p>
               <p className="text-[10px] text-zinc-500 truncate uppercase font-mono">
-                {profile?.householdId ? 'Grupo Ativo' : 'Sem Grupo'}
+                {!profile?.householdId ? 'Sem Grupo' : (household ? household.name : 'Carregando...')}
               </p>
             </div>
           </div>
@@ -672,7 +711,7 @@ export const Dashboard: React.FC = () => {
             {[
               { id: 'all', label: 'Tudo' },
               { id: 'personal', label: 'Meu' },
-              { id: 'shared', label: 'Casal' },
+              { id: 'shared', label: household?.name || 'Casal' },
             ].map((f) => (
               <button
                 key={f.id}
@@ -829,23 +868,28 @@ export const Dashboard: React.FC = () => {
                         )}>
                           {t.type === 'income' ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="font-bold text-zinc-900 truncate text-sm">{t.description || t.category}</p>
-                          <div className="flex items-center gap-2 mt-0.5">
-                            <span className={cn(
-                              "text-[7px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-wider",
-                              t.scope === 'shared' ? "bg-zinc-100 text-zinc-500" : "bg-indigo-50 text-indigo-500"
-                            )}>
-                              {t.scope === 'shared' ? 'Casal' : 'Meu'}
-                            </span>
-                            <span className="text-[9px] text-zinc-400 font-medium uppercase">{format(parseISO(t.date), 'dd MMM')}</span>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <p className={cn("font-black text-sm font-mono", t.type === 'income' ? "text-emerald-600" : "text-rose-600")}>
-                            {t.type === 'income' ? '+' : '-'}{formatCurrency(t.amount)}
-                          </p>
-                        </div>
+                              <div className="flex-1">
+                                <div className="flex items-center justify-between group">
+                                  <div className="flex flex-col">
+                                    <p className="font-bold text-zinc-900 group-hover:text-zinc-700 transition-colors uppercase tracking-tight text-xs">{t.description || t.category}</p>
+                                    <div className="flex items-center gap-2 mt-0.5">
+                                      <span className={cn(
+                                        "text-[7px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-wider",
+                                        t.scope === 'shared' ? "bg-amber-100 text-amber-700" : "bg-indigo-50 text-indigo-500"
+                                      )}>
+                                        {t.scope === 'shared' ? (household?.name || 'Casal') : 'Pessoal'}
+                                      </span>
+                                      <span className="text-[9px] text-zinc-400 font-medium uppercase font-mono">{t.userName}</span>
+                                    </div>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className={cn("font-black text-sm font-mono", t.type === 'income' ? "text-emerald-600" : "text-rose-600")}>
+                                      {t.type === 'income' ? '+' : '-'}{formatCurrency(t.amount)}
+                                    </p>
+                                    <p className="text-[9px] text-zinc-400 font-bold uppercase italic">{t.category}</p>
+                                  </div>
+                                </div>
+                              </div>
                       </div>
                     ))}
                     {filteredTransactions.length === 0 && (
@@ -944,7 +988,7 @@ export const Dashboard: React.FC = () => {
                             "text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase",
                             t.scope === 'shared' ? "bg-zinc-100 text-zinc-500" : "bg-indigo-50 text-indigo-500"
                           )}>
-                            {t.scope === 'shared' ? 'Casal' : 'Meu'}
+                            {t.scope === 'shared' ? (household?.name || 'Casal') : 'Meu'}
                           </span>
                         </div>
                       </td>
@@ -1130,7 +1174,7 @@ export const Dashboard: React.FC = () => {
                               "w-12 h-12 rounded-full flex items-center justify-center text-zinc-600 font-bold shadow-sm",
                               member.uid === user?.uid ? "bg-indigo-50 border border-indigo-100" : "bg-white"
                             )}>
-                              {member.displayName.charAt(0)}
+                              {member.displayName.charAt(0).toUpperCase()}
                             </div>
                             <div>
                               <p className="text-sm font-bold text-zinc-900 flex items-center gap-2">
@@ -1145,6 +1189,40 @@ export const Dashboard: React.FC = () => {
                             <button 
                               onClick={() => handleRemoveMember(member.uid)}
                               className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors border border-transparent hover:border-rose-100"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+
+                      {sentInvitations.map((inv) => (
+                        <div key={inv.id} className="flex items-center justify-between p-4 bg-zinc-50/50 rounded-2xl border border-dashed border-zinc-200">
+                          <div className="flex items-center gap-4 opacity-70">
+                            <div className="w-12 h-12 rounded-full bg-white flex items-center justify-center text-zinc-400 font-bold shadow-sm border-2 border-dashed border-zinc-100 italic">
+                              {inv.invitedUserEmail?.charAt(0).toUpperCase() || '?'}
+                            </div>
+                            <div>
+                              <p className="text-sm font-bold text-zinc-900 flex items-center gap-2">
+                                {inv.invitedUserEmail || 'Convidado'}
+                                <span className={cn(
+                                  "text-[8px] px-1.5 py-0.5 rounded-full uppercase tracking-widest font-black",
+                                  inv.status === 'pending' ? "bg-amber-50 text-amber-600 animate-pulse" : 
+                                  inv.status === 'accepted' ? "bg-emerald-50 text-emerald-600" : "bg-zinc-100 text-zinc-400"
+                                )}>
+                                  {inv.status === 'pending' ? 'Pendente' : inv.status === 'accepted' ? 'Aceito' : 'Recusado'}
+                                </span>
+                              </p>
+                              <p className="text-[10px] text-zinc-500 font-medium uppercase font-mono tracking-tight italic">
+                                {inv.status === 'pending' ? 'Convite enviado' : inv.status === 'accepted' ? 'Fazem parte do grupo' : 'Convite encerrado'}
+                              </p>
+                            </div>
+                          </div>
+                          {inv.status === 'pending' && inv.invitedByUserId === user?.uid && (
+                            <button 
+                              onClick={() => handleDeclineInvitation(inv.id!)}
+                              className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors"
+                              title="Cancelar Convite"
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
@@ -1218,11 +1296,11 @@ export const Dashboard: React.FC = () => {
 
       {/* Mobile Navbar */}
       <nav className="md:hidden fixed bottom-6 left-6 right-6 h-16 bg-zinc-900 text-white rounded-2xl flex items-center justify-around px-4 shadow-2xl z-20">
-        <button onClick={() => setActiveTab('overview')} className={cn("p-2", activeTab === 'overview' ? "text-white" : "text-zinc-500")} title="Visão Geral"><PieChartIcon className="w-6 h-6" /></button>
-        <button onClick={() => setActiveTab('transactions')} className={cn("p-2", activeTab === 'transactions' ? "text-white" : "text-zinc-500")} title="Transações"><CalendarClock className="w-6 h-6" /></button>
+        <button onClick={() => setActiveTab('overview')} className={cn("p-2", activeTab === 'overview' ? "text-white" : "text-zinc-500")} title="Visão Geral"><PieChartIcon className="w-5 h-6" /></button>
+        <button onClick={() => setActiveTab('transactions')} className={cn("p-2", activeTab === 'transactions' ? "text-white" : "text-zinc-500")} title="Extrato"><CalendarClock className="w-6 h-6" /></button>
         <button onClick={() => setIsModalOpen(true)} className="bg-white text-zinc-900 p-3 rounded-xl shadow-xl -mt-8 border-4 border-zinc-50" title="Novo Lançamento"><Plus className="w-6 h-6" /></button>
         <button onClick={() => setActiveTab('goals')} className={cn("p-2", activeTab === 'goals' ? "text-white" : "text-zinc-500")} title="Metas"><Target className="w-6 h-6" /></button>
-        <button onClick={() => setActiveTab('group')} className={cn("p-2", activeTab === 'group' ? "text-white" : "text-zinc-500")} title="Grupo"><User className="w-6 h-6" /></button>
+        <button onClick={() => setActiveTab('profile')} className={cn("p-2", activeTab === 'profile' ? "text-white" : "text-zinc-500")} title="Perfil e Grupo"><User className="w-6 h-6" /></button>
       </nav>
 
       {/* Modal - Nova Transação */}
@@ -1264,7 +1342,7 @@ export const Dashboard: React.FC = () => {
                   <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-100 rounded-2xl">
                     {[
                       { id: 'personal', label: 'Pessoal (Meu)' },
-                      { id: 'shared', label: 'Casal (Compartilhado)' },
+                      { id: 'shared', label: `${household?.name || 'Casal'} (Grupo)` },
                     ].map((s) => (
                       <button
                         key={s.id}
@@ -1282,70 +1360,103 @@ export const Dashboard: React.FC = () => {
                 </div>
 
                 {formData.scope === 'shared' && formData.type === 'expense' && groupMembers.length > 0 && (
-                  <div className="p-4 bg-zinc-50 rounded-2xl border border-zinc-200 animate-in fade-in slide-in-from-top-2">
+                  <div className="p-5 bg-gradient-to-br from-indigo-50/50 to-zinc-50 rounded-3xl border border-indigo-100 animate-in fade-in slide-in-from-top-2 shadow-sm">
                     <div className="flex items-center justify-between mb-4">
-                      <label className="text-xs font-black text-zinc-900 uppercase tracking-widest">Divisão de Gastos</label>
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 bg-indigo-600 rounded-lg">
+                          <User className="w-3 h-3 text-white" />
+                        </div>
+                        <label className="text-[10px] font-black text-zinc-900 uppercase tracking-widest">Divisores do Gasto</label>
+                      </div>
                       <button 
                         type="button"
-                        onClick={() => setFormData({ ...formData, isEqualSplit: !formData.isEqualSplit })}
-                        className="text-[10px] font-black text-indigo-600 uppercase hover:underline"
+                        onClick={() => {
+                          const total = parseFloat(formData.amount) || 0;
+                          const splitAmount = (total / groupMembers.length).toFixed(2);
+                          setFormData({ 
+                            ...formData, 
+                            isEqualSplit: true,
+                            splits: groupMembers.map(m => ({ userId: m.uid, userName: m.displayName, amount: splitAmount }))
+                          });
+                        }}
+                        className="text-[10px] font-black text-indigo-600 uppercase hover:bg-indigo-100 px-3 py-1.5 rounded-xl transition-all border border-indigo-200 bg-white"
                       >
-                        {formData.isEqualSplit ? 'Personalizar' : 'Dividir Igual'}
+                        Dividir Igual
                       </button>
                     </div>
 
-                    {formData.isEqualSplit ? (
-                      <p className="text-[10px] text-zinc-500 italic">O valor de {formatCurrency(parseFloat(formData.amount) || 0)} será dividido igualmente entre {groupMembers.length} membros ({formatCurrency((parseFloat(formData.amount) || 0) / groupMembers.length)} cada).</p>
-                    ) : (
-                      <div className="space-y-3">
-                        {groupMembers.map(member => {
-                          const currentSplit = formData.splits.find(s => s.userId === member.uid) || { userId: member.uid, userName: member.displayName, amount: '' };
-                          return (
-                            <div key={member.uid} className="flex items-center justify-between gap-4">
-                              <span className="text-xs font-bold text-zinc-700 truncate">{member.displayName}</span>
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] text-zinc-400 font-mono">R$</span>
-                                <input 
-                                  type="number"
-                                  placeholder="0,00"
-                                  value={currentSplit.amount}
-                                  onChange={(e) => {
-                                    const newSplits = [...formData.splits];
-                                    const index = newSplits.findIndex(s => s.userId === member.uid);
-                                    if (index >= 0) {
-                                      newSplits[index].amount = e.target.value;
-                                    } else {
-                                      newSplits.push({ userId: member.uid, userName: member.displayName, amount: e.target.value });
-                                    }
-                                    setFormData({ ...formData, splits: newSplits });
-                                  }}
-                                  className="w-20 px-2 py-1 bg-white border border-zinc-200 rounded-lg text-xs font-bold outline-none focus:ring-1 focus:ring-zinc-900"
-                                />
-                              </div>
+                    <div className="space-y-4">
+                      {groupMembers.map(member => {
+                        const currentSplit = formData.splits.find(s => s.userId === member.uid) || { userId: member.uid, userName: member.displayName, amount: '' };
+                        return (
+                          <div key={member.uid} className="flex items-center justify-between gap-4 group">
+                            <div className="flex flex-col">
+                              <span className="text-xs font-bold text-zinc-800">{member.displayName}</span>
+                              {member.uid === user?.uid && <span className="text-[8px] text-indigo-500 font-black uppercase tracking-tighter">Você</span>}
                             </div>
-                          );
-                        })}
-                        <div className="pt-2 border-t border-zinc-200 flex justify-between items-center">
-                          <span className="text-[10px] font-black uppercase text-zinc-400">Total Definido</span>
-                          <span className={cn(
-                            "text-xs font-bold font-mono",
-                            Math.abs(formData.splits.reduce((acc, s) => acc + (parseFloat(s.amount) || 0), 0) - (parseFloat(formData.amount) || 0)) < 0.01 ? "text-emerald-600" : "text-rose-600"
-                          )}>
-                            {formatCurrency(formData.splits.reduce((acc, s) => acc + (parseFloat(s.amount) || 0), 0))}
-                          </span>
+                            <div className="flex items-center gap-2 group-focus-within:translate-x-[-4px] transition-transform">
+                              <span className="text-[10px] text-zinc-400 font-black">R$</span>
+                              <input 
+                                type="number"
+                                step="0.01"
+                                placeholder="0,00"
+                                value={currentSplit.amount}
+                                onChange={(e) => {
+                                  let newSplits = [...formData.splits];
+                                  const index = newSplits.findIndex(s => s.userId === member.uid);
+                                  const val = e.target.value;
+                                  
+                                  if (index >= 0) {
+                                    newSplits[index].amount = val;
+                                  } else {
+                                    newSplits.push({ userId: member.uid, userName: member.displayName, amount: val });
+                                  }
+                                  
+                                  // Ensure all members have a split entry
+                                  groupMembers.forEach(m => {
+                                    if (!newSplits.find(ns => ns.userId === m.uid)) {
+                                      newSplits.push({ userId: m.uid, userName: m.displayName, amount: '' });
+                                    }
+                                  });
+                                  
+                                  const sum = newSplits.reduce((acc, s) => acc + (parseFloat(s.amount) || 0), 0);
+                                  
+                                  setFormData({ 
+                                    ...formData, 
+                                    splits: newSplits,
+                                    amount: sum > 0 ? sum.toFixed(2) : formData.amount,
+                                    isEqualSplit: false 
+                                  });
+                                }}
+                                className="w-28 px-4 py-3 bg-white border border-zinc-200 rounded-2xl text-sm font-black outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-right shadow-sm group-focus-within:border-indigo-300"
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                      
+                      <div className="pt-5 mt-2 border-t border-zinc-200">
+                        <div className="flex justify-between items-center bg-zinc-900 p-4 rounded-2xl shadow-xl">
+                          <span className="text-[10px] font-black uppercase text-zinc-400 tracking-widest">Soma Total</span>
+                          <div className="flex flex-col items-end">
+                            <span className="text-xl font-black font-mono text-white">
+                              {formatCurrency(formData.splits.reduce((acc, s) => acc + (parseFloat(s.amount) || 0), 0))}
+                            </span>
+                          </div>
                         </div>
                       </div>
-                    )}
+                    </div>
                   </div>
                 )}
 
                 <div className="space-y-4">
-                   <div>
-                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Valor (R$)</label>
+                   <div className={cn(formData.scope === 'shared' && formData.type === 'expense' && groupMembers.length > 0 && "opacity-50 grayscale scale-95 origin-left")}>
+                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Valor total (R$)</label>
                     <input
                       type="number"
                       step="0.01"
                       required
+                      readOnly={formData.scope === 'shared' && formData.type === 'expense' && groupMembers.length > 0}
                       value={formData.amount}
                       onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
                       placeholder="0,00"
