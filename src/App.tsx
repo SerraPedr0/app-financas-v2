@@ -5,7 +5,6 @@
 
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { Login } from './pages/Login';
-import { SetupHousehold } from './pages/SetupHousehold';
 import { Dashboard } from './pages/Dashboard';
 
 function AppContent() {
@@ -21,11 +20,6 @@ function AppContent() {
 
   if (!user) {
     return <Login />;
-  }
-
-  // If user exists but no profile yet (legacy or during creation), show setup
-  if (!profile) {
-    return <SetupHousehold />;
   }
 
   return <Dashboard />;

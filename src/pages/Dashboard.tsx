@@ -1,8 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { collection, query, onSnapshot, orderBy, addDoc, deleteDoc, doc, serverTimestamp, where, limit, or, getDocs, updateDoc, arrayUnion, getDoc } from 'firebase/firestore';
+import { 
+  collection, query, onSnapshot, orderBy, addDoc, deleteDoc, 
+  doc, serverTimestamp, where, limit, or, getDocs, 
+  updateDoc, arrayUnion, getDoc, setDoc 
+} from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
-import { Transaction, Goal, RecurringTransaction, Household } from '../types';
+import { Transaction, Goal, RecurringTransaction, Household, Invitation, AppNotification, UserProfile } from '../types';
 import { formatCurrency, cn, handleFirestoreError, OperationType } from '../lib/utils';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
@@ -12,7 +16,8 @@ import {
   Plus, TrendingUp, TrendingDown, Wallet, Target, 
   Clock, ArrowUpRight, ArrowDownRight, LogOut, Settings,
   PieChart as PieChartIcon, Calendar, User, Filter, MoreVertical,
-  ChevronRight, Trash2, CalendarClock, UserPlus, Link as LinkIcon
+  ChevronRight, Trash2, CalendarClock, UserPlus, Link as LinkIcon,
+  Bell, Calendar as CalendarIcon, CheckCircle2, AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format, startOfMonth, endOfMonth, isWithinInterval, parseISO } from 'date-fns';
@@ -27,13 +32,15 @@ export const Dashboard: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isRecurringModalOpen, setIsRecurringModalOpen] = useState(false);
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'goals' | 'recurring'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'goals' | 'recurring' | 'group'>('overview');
   
   const [inviteEmail, setInviteEmail] = useState('');
   const [isInviteLoading, setIsInviteLoading] = useState(false);
   const [inviteError, setInviteError] = useState('');
   const [joinCode, setJoinCode] = useState('');
-  
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
+  const [groupMembers, setGroupMembers] = useState<UserProfile[]>([]);
+
   // Form State
   const [formData, setFormData] = useState({
     amount: '',
@@ -56,65 +63,148 @@ export const Dashboard: React.FC = () => {
   const [dashboardFilter, setDashboardFilter] = useState<'all' | 'personal' | 'shared'>('all');
 
   useEffect(() => {
-    if (!profile?.householdId || !user) return;
+    if (!user) return;
 
-    // Fetch household details
-    const householdRef = doc(db, 'households', profile.householdId);
-    const unsubHousehold = onSnapshot(householdRef, (snapshot) => {
-      if (snapshot.exists()) {
-        setHousehold({ id: snapshot.id, ...snapshot.data() } as Household);
-      }
-    });
+    const unsubs: (() => void)[] = [];
 
-    const transactionsPath = `households/${profile.householdId}/transactions`;
-    const q = query(
-      collection(db, transactionsPath),
-      or(
-        where('scope', '==', 'shared'),
-        where('userId', '==', user.uid)
-      ),
+    // --- Personal Data Fetching ---
+    const personalTransactionsPath = `users/${user.uid}/transactions`;
+    const qPersonalTransactions = query(
+      collection(db, personalTransactionsPath),
       orderBy('date', 'desc'),
       limit(100)
     );
 
-    const unsubTransactions = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Transaction[];
-      setTransactions(data);
+    const unsubPersonalTransactions = onSnapshot(qPersonalTransactions, (snapshot) => {
+      const personalData = snapshot.docs.map(doc => ({ 
+        id: doc.id, 
+        ...doc.data(),
+        scope: 'personal' // Force scope for personal data
+      })) as Transaction[];
+      
+      setTransactions(prev => {
+        const sharedData = prev.filter(t => t.scope === 'shared');
+        return [...personalData, ...sharedData].sort((a, b) => b.date.localeCompare(a.date));
+      });
     }, (error) => {
-      handleFirestoreError(error, OperationType.GET, transactionsPath);
+      handleFirestoreError(error, OperationType.GET, personalTransactionsPath);
     });
+    unsubs.push(unsubPersonalTransactions);
 
-    const goalsPath = `households/${profile.householdId}/goals`;
-    const qGoals = query(collection(db, goalsPath));
-    const unsubGoals = onSnapshot(qGoals, (snapshot) => {
+    const personalGoalsPath = `users/${user.uid}/goals`;
+    const unsubPersonalGoals = onSnapshot(query(collection(db, personalGoalsPath)), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Goal[];
-      setGoals(data);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, goalsPath);
+      setGoals(prev => {
+        const shared = prev.filter(g => g.id?.includes('shared_')); // Simple way to mark shared
+        return [...data, ...shared];
+      });
     });
+    unsubs.push(unsubPersonalGoals);
 
-    const recurringPath = `households/${profile.householdId}/recurring`;
-    const qRecurring = query(collection(db, recurringPath));
-    const unsubRecurring = onSnapshot(qRecurring, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as RecurringTransaction[];
-      setRecurring(data);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, recurringPath);
+    const personalRecurringPath = `users/${user.uid}/recurring`;
+    const unsubPersonalRecurring = onSnapshot(query(collection(db, personalRecurringPath)), (snapshot) => {
+      const personalData = snapshot.docs.map(doc => ({ 
+        id: doc.id, 
+        ...doc.data(),
+        scope: 'personal'
+      })) as RecurringTransaction[];
+      
+      setRecurring(prev => {
+        const sharedData = prev.filter(r => r.scope === 'shared');
+        return [...personalData, ...sharedData];
+      });
     });
+    unsubs.push(unsubPersonalRecurring);
 
-    return () => {
-      unsubHousehold();
-      unsubTransactions();
-      unsubGoals();
-      unsubRecurring();
-    };
+    // --- Shared Data Fetching ---
+    if (profile?.householdId) {
+      const householdRef = doc(db, 'households', profile.householdId);
+      const unsubHousehold = onSnapshot(householdRef, (snapshot) => {
+        if (snapshot.exists()) {
+          setHousehold({ id: snapshot.id, ...snapshot.data() } as Household);
+        } else {
+          setHousehold(null);
+        }
+      });
+      unsubs.push(unsubHousehold);
+
+      const sharedTransactionsPath = `households/${profile.householdId}/transactions`;
+      const qShared = query(collection(db, sharedTransactionsPath), orderBy('date', 'desc'), limit(100));
+      const unsubSharedTransactions = onSnapshot(qShared, (snapshot) => {
+        const sharedData = snapshot.docs.map(doc => ({ 
+          id: doc.id, 
+          ...doc.data(),
+          scope: 'shared'
+        })) as Transaction[];
+        
+        setTransactions(prev => {
+          const personalData = prev.filter(t => t.scope === 'personal');
+          return [...personalData, ...sharedData].sort((a, b) => b.date.localeCompare(a.date));
+        });
+      });
+      unsubs.push(unsubSharedTransactions);
+
+      const sharedRecurringPath = `households/${profile.householdId}/recurring`;
+      const unsubSharedRecurring = onSnapshot(query(collection(db, sharedRecurringPath)), (snapshot) => {
+        const sharedData = snapshot.docs.map(doc => ({ 
+          id: doc.id, 
+          ...doc.data(),
+          scope: 'shared'
+        })) as RecurringTransaction[];
+        
+        setRecurring(prev => {
+          const personalData = prev.filter(r => r.scope === 'personal');
+          return [...personalData, ...sharedData];
+        });
+      });
+      unsubs.push(unsubSharedRecurring);
+    } else {
+      setHousehold(null);
+      setTransactions(prev => prev.filter(t => t.scope === 'personal'));
+      setGroupMembers([]);
+    }
+
+    const invitationsPath = 'invitations';
+    const qInvitations = query(
+      collection(db, invitationsPath),
+      where('invitedUserId', '==', user.uid),
+      where('status', '==', 'pending')
+    );
+    const unsubInvitations = onSnapshot(qInvitations, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Invitation[];
+      setInvitations(data);
+    });
+    unsubs.push(unsubInvitations);
+
+    return () => unsubs.forEach(unsub => unsub());
   }, [profile?.householdId, user?.uid]);
+
+  useEffect(() => {
+    if (!household?.memberIds || household.memberIds.length === 0) return;
+    
+    const fetchMembers = async () => {
+      try {
+        const q = query(collection(db, 'users'), where('uid', 'in', household.memberIds));
+        const snapshot = await getDocs(q);
+        const members = snapshot.docs.map(doc => doc.data() as UserProfile);
+        setGroupMembers(members);
+      } catch (error) {
+        console.error("Error fetching group members:", error);
+      }
+    };
+    
+    fetchMembers();
+  }, [household?.memberIds]);
 
   const handleAddTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!profile?.householdId || !user) return;
+    if (!user || !profile) return;
 
-    const path = `households/${profile.householdId}/transactions`;
+    const isShared = formData.scope === 'shared' && profile.householdId;
+    const path = isShared 
+      ? `households/${profile.householdId}/transactions`
+      : `users/${user.uid}/transactions`;
+
     try {
       await addDoc(collection(db, path), {
         ...formData,
@@ -127,7 +217,7 @@ export const Dashboard: React.FC = () => {
       setFormData({
         amount: '',
         type: 'expense',
-        scope: 'shared',
+        scope: isShared ? 'shared' : 'personal',
         category: 'Alimentação',
         description: '',
         date: format(new Date(), 'yyyy-MM-dd'),
@@ -138,11 +228,31 @@ export const Dashboard: React.FC = () => {
     }
   };
 
+  const deleteTransaction = async (id: string) => {
+    if (!user || !profile || !window.confirm('Excluir esta transação?')) return;
+    
+    // Find transaction to know its scope
+    const t = transactions.find(item => item.id === id);
+    if (!t) return;
+
+    const path = t.scope === 'shared' && profile.householdId
+      ? `households/${profile.householdId}/transactions/${id}`
+      : `users/${user.uid}/transactions/${id}`;
+    try {
+      await deleteDoc(doc(db, path));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
+  };
+
   const handleAddRecurring = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!profile?.householdId || !user) return;
+    if (!user || !profile) return;
 
-    const path = `households/${profile.householdId}/recurring`;
+    const path = profile.householdId 
+      ? `households/${profile.householdId}/recurring` 
+      : `users/${user.uid}/recurring`;
+
     try {
       await addDoc(collection(db, path), {
         ...recurringFormData,
@@ -165,19 +275,17 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  const deleteTransaction = async (id: string) => {
-    if (!profile?.householdId || !window.confirm('Excluir esta transação?')) return;
-    const path = `households/${profile.householdId}/transactions/${id}`;
-    try {
-      await deleteDoc(doc(db, path));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, path);
-    }
-  };
-
   const deleteRecurring = async (id: string) => {
-    if (!profile?.householdId || !window.confirm('Excluir esta conta fixa?')) return;
-    const path = `households/${profile.householdId}/recurring/${id}`;
+    if (!user || !profile || !window.confirm('Excluir esta conta fixa?')) return;
+    
+    // Find in local state to check scope
+    const r = recurring.find(item => item.id === id);
+    if (!r) return;
+
+    const path = r.scope === 'shared' && profile.householdId
+      ? `households/${profile.householdId}/recurring/${id}`
+      : `users/${user.uid}/recurring/${id}`;
+
     try {
       await deleteDoc(doc(db, path));
     } catch (error) {
@@ -187,7 +295,7 @@ export const Dashboard: React.FC = () => {
 
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!profile?.householdId || !user || !inviteEmail) return;
+    if (!profile?.householdId || !user || !inviteEmail || !household) return;
 
     setIsInviteLoading(true);
     setInviteError('');
@@ -203,18 +311,156 @@ export const Dashboard: React.FC = () => {
       const invitedUser = querySnapshot.docs[0];
       const invitedUserId = invitedUser.id;
 
-      // Update household members
-      await updateDoc(doc(db, 'households', profile.householdId), {
-        memberIds: arrayUnion(invitedUserId)
-      });
+      if (household.memberIds.includes(invitedUserId)) {
+        setInviteError('Este usuário já faz parte do seu grupo.');
+        return;
+      }
 
-      // Update invited user's householdId
-      await updateDoc(doc(db, 'users', invitedUserId), {
-        householdId: profile.householdId
+      if (invitedUserId === user.uid) {
+        setInviteError('Você não pode convidar a si mesmo.');
+        return;
+      }
+
+      // Create invitation instead of direct update
+      await addDoc(collection(db, 'invitations'), {
+        householdId: profile.householdId,
+        householdName: household.name,
+        invitedByEmail: user.email,
+        invitedByName: profile.displayName,
+        invitedUserId: invitedUserId,
+        status: 'pending',
+        createdAt: serverTimestamp()
       });
 
       setInviteEmail('');
-      alert('Parceiro adicionado com sucesso!');
+      alert('Convite enviado com sucesso! O parceiro precisará aceitar.');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'invitations');
+    } finally {
+      setIsInviteLoading(false);
+    }
+  };
+
+  const handleAcceptInvitation = async (invitation: Invitation) => {
+    if (!user) return;
+    setIsInviteLoading(true);
+    try {
+      // 1. Join new household
+      await updateDoc(doc(db, 'households', invitation.householdId), {
+        memberIds: arrayUnion(user.uid)
+      });
+
+      // 2. Update user profile
+      await updateDoc(doc(db, 'users', user.uid), {
+        householdId: invitation.householdId
+      });
+
+      // 3. Mark invitation as accepted
+      await updateDoc(doc(db, 'invitations', invitation.id!), {
+        status: 'accepted'
+      });
+
+      alert('Você entrou no novo grupo!');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'invitations/households');
+    } finally {
+      setIsInviteLoading(false);
+    }
+  };
+
+  const handleDeclineInvitation = async (invitationId: string) => {
+    try {
+      await updateDoc(doc(db, 'invitations', invitationId), {
+        status: 'declined'
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'invitations');
+    }
+  };
+
+  const handleLeaveGroup = async () => {
+    if (!profile?.householdId || !user || !household) return;
+    
+    if (!window.confirm('Tem certeza que deseja sair deste grupo? Suas finanças compartilhadas continuarão no grupo, mas você terá seu espaço individual novamente.')) return;
+
+    setIsInviteLoading(true);
+    try {
+      // 1. Remove user from household
+      const remainingMembers = household.memberIds.filter(id => id !== user.uid);
+      
+      if (remainingMembers.length === 0) {
+        await deleteDoc(doc(db, 'households', profile.householdId));
+      } else {
+        await updateDoc(doc(db, 'households', profile.householdId), {
+          memberIds: remainingMembers
+        });
+      }
+
+      // 2. Update user profile to null
+      await updateDoc(doc(db, 'users', user.uid), {
+        householdId: null
+      });
+
+      alert('Você saiu do grupo com sucesso.');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'households');
+    } finally {
+      setIsInviteLoading(false);
+    }
+  };
+
+  const handleRemoveMember = async (targetUid: string) => {
+    if (!profile?.householdId || !household || !user) return;
+    
+    if (household.createdBy !== user.uid) {
+      alert("Apenas o criador do grupo pode remover membros.");
+      return;
+    }
+
+    if (!window.confirm('Deseja remover este membro do grupo?')) return;
+
+    setIsInviteLoading(true);
+    try {
+      // 1. Update removed user's profile to null
+      await updateDoc(doc(db, 'users', targetUid), {
+        householdId: null
+      });
+
+      // 2. Remove from current household memberIds
+      const remainingMembers = household.memberIds.filter(id => id !== targetUid);
+      await updateDoc(doc(db, 'households', profile.householdId), {
+        memberIds: remainingMembers
+      });
+
+      alert('Membro removido com sucesso.');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'households');
+    } finally {
+      setIsInviteLoading(false);
+    }
+  };
+
+  const handleCreateGroup = async () => {
+    if (!user || profile?.householdId) return;
+    
+    const name = window.prompt('Dê um nome para o seu grupo:', 'Nosso Grupo');
+    if (!name) return;
+
+    setIsInviteLoading(true);
+    try {
+      const householdId = Math.random().toString(36).substring(2, 10).toUpperCase();
+      await setDoc(doc(db, 'households', householdId), {
+        name,
+        createdBy: user.uid,
+        memberIds: [user.uid],
+        createdAt: serverTimestamp()
+      });
+
+      await updateDoc(doc(db, 'users', user.uid), {
+        householdId: householdId
+      });
+
+      alert('Grupo criado! Agora você pode convidar alguém na aba de Gestão de Grupo.');
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'households');
     } finally {
@@ -224,7 +470,7 @@ export const Dashboard: React.FC = () => {
 
   const handleJoinGroup = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !joinCode) return;
+    if (!user || !joinCode || profile?.householdId) return;
 
     setIsInviteLoading(true);
     try {
@@ -236,18 +482,15 @@ export const Dashboard: React.FC = () => {
         return;
       }
 
-      // Add user to new group
       await updateDoc(householdRef, {
         memberIds: arrayUnion(user.uid)
       });
 
-      // Update user profile
       await updateDoc(doc(db, 'users', user.uid), {
         householdId: joinCode.trim()
       });
 
       setJoinCode('');
-      setIsGroupModalOpen(false);
       alert('Você entrou no grupo com sucesso!');
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'households');
@@ -262,6 +505,30 @@ export const Dashboard: React.FC = () => {
       alert('ID do Grupo copiado para a área de transferência!');
     }
   };
+
+  // Build Notification Feed
+  const notifications: AppNotification[] = [
+    ...invitations.map(inv => ({
+      id: inv.id!,
+      type: 'invitation' as const,
+      title: 'Novo Convite',
+      message: `${inv.invitedByName} convidou você para o grupo "${inv.householdName}".`,
+      date: inv.createdAt?.toDate() || new Date(),
+      data: inv
+    })),
+    ...recurring.filter(item => {
+      const today = new Date().getDate();
+      const diff = item.dayOfMonth - today;
+      return diff >= 0 && diff <= 5; // Bills in next 5 days
+    }).map(bill => ({
+      id: bill.id!,
+      type: 'bill' as const,
+      title: 'Próxima Conta',
+      message: `${bill.description} vence no dia ${bill.dayOfMonth}.`,
+      date: new Date(),
+      data: bill
+    }))
+  ].sort((a, b) => b.date.getTime() - a.date.getTime());
 
   // Filtered lists based on current dashboard filter
   const filteredTransactions = transactions.filter(t => {
@@ -297,24 +564,25 @@ export const Dashboard: React.FC = () => {
         </div>
 
         <nav className="flex-1 space-y-2">
-          {[
-            { id: 'overview', label: 'Visão Geral', icon: PieChartIcon },
-            { id: 'transactions', label: 'Transações', icon: Clock },
-            { id: 'goals', label: 'Metas', icon: Target },
-            { id: 'recurring', label: 'Contas Fixas', icon: CalendarClock },
-          ].map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setActiveTab(item.id as any)}
-              className={cn(
-                "w-full flex items-center gap-3 p-3 rounded-xl transition-all",
-                activeTab === item.id ? "bg-white text-zinc-900 shadow-lg" : "text-zinc-400 hover:text-white hover:bg-zinc-800"
-              )}
-            >
-              <item.icon className="w-5 h-5" />
-              <span className="font-medium">{item.label}</span>
-            </button>
-          ))}
+            {[
+              { id: 'overview', label: 'Visão Geral', icon: PieChartIcon },
+              { id: 'transactions', label: 'Transações', icon: Clock },
+              { id: 'goals', label: 'Metas', icon: Target },
+              { id: 'recurring', label: 'Contas Fixas', icon: CalendarClock },
+              { id: 'group', label: 'Gestão de Grupo', icon: UserPlus },
+            ].map((item) => (
+              <button
+                key={item.id}
+                onClick={() => setActiveTab(item.id as any)}
+                className={cn(
+                  "w-full flex items-center gap-3 p-3 rounded-xl transition-all",
+                  activeTab === item.id ? "bg-white text-zinc-900 shadow-lg" : "text-zinc-400 hover:text-white hover:bg-zinc-800"
+                )}
+              >
+                <item.icon className="w-5 h-5" />
+                <span className="font-medium">{item.label}</span>
+              </button>
+            ))}
         </nav>
 
         <div className="mt-auto space-y-4 pt-6 border-t border-zinc-800">
@@ -324,12 +592,9 @@ export const Dashboard: React.FC = () => {
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate">{profile?.displayName}</p>
-              <button 
-                onClick={() => setIsGroupModalOpen(true)}
-                className="text-xs text-zinc-500 truncate hover:text-zinc-300 transition-colors flex items-center gap-1 uppercase font-mono"
-              >
-                {household?.memberIds.length === 1 ? 'Grupo Individual' : 'Grupo Compartilhado'} <Settings className="w-3 h-3" />
-              </button>
+              <p className="text-[10px] text-zinc-500 truncate uppercase font-mono">
+                {profile?.householdId ? 'Grupo Ativo' : 'Sem Grupo'}
+              </p>
             </div>
           </div>
           <button 
@@ -419,131 +684,178 @@ export const Dashboard: React.FC = () => {
         </header>
 
         {activeTab === 'overview' && (
-          <div className="space-y-6">
-            {balance < 1000 && (
-              <motion.div 
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                className="bg-amber-50 border border-amber-200 p-4 rounded-2xl flex items-center gap-3 text-amber-800"
-              >
-                <Clock className="w-5 h-5 text-amber-500" />
-                <p className="text-sm font-medium">Atenção: O saldo consolidado está abaixo de R$ 1.000,00. Planeje os próximos gastos!</p>
-              </motion.div>
-            )}
-            {/* Stats Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-              <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-zinc-900 p-6 rounded-3xl text-white shadow-xl">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="p-2 bg-white/10 rounded-xl"><Wallet className="w-6 h-6 text-white" /></div>
-                  <span className="text-xs text-zinc-400 font-mono">Saldo Consolidado</span>
-                </div>
-                <h3 className="text-3xl font-bold">{formatCurrency(balance)}</h3>
-              </motion.div>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            {/* Left Column: Stats & Charts */}
+            <div className="lg:col-span-2 space-y-8">
+              {/* Stats Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+                <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className={cn(
+                  "p-6 rounded-3xl text-white shadow-xl flex flex-col justify-between h-40",
+                  balance < 0 ? "bg-rose-600" : "bg-zinc-900"
+                )}>
+                  <div className="flex items-center justify-between">
+                    <div className="p-2 bg-white/10 rounded-xl"><Wallet className="w-6 h-6 text-white" /></div>
+                    <span className="text-[10px] text-zinc-300 font-black uppercase tracking-widest">Saldo</span>
+                  </div>
+                  <div>
+                    <h3 className="text-3xl font-black">{formatCurrency(balance)}</h3>
+                    {balance < 1000 && balance > 0 && <p className="text-[10px] text-rose-200 font-bold flex items-center gap-1 mt-1"><AlertCircle className="w-3 h-3" /> Saldo Baixo</p>}
+                  </div>
+                </motion.div>
 
-              <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ delay: 0.1 }} className="bg-white p-6 rounded-3xl border border-zinc-200 shadow-sm">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="p-2 bg-emerald-50 rounded-xl"><TrendingUp className="w-6 h-6 text-emerald-600" /></div>
-                  <span className="text-xs text-zinc-400 font-mono">Receitas</span>
-                </div>
-                <h3 className="text-3xl font-bold text-zinc-900">{formatCurrency(income)}</h3>
-                <div className="mt-2 flex items-center gap-1 text-xs text-emerald-600">
-                  <ArrowUpRight className="w-4 h-4" /> <span>Este mês</span>
-                </div>
-              </motion.div>
+                <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ delay: 0.1 }} className="bg-white p-6 rounded-3xl border border-zinc-200 shadow-sm flex flex-col justify-between h-40">
+                  <div className="flex items-center justify-between">
+                    <div className="p-2 bg-emerald-50 rounded-xl"><TrendingUp className="w-6 h-6 text-emerald-600" /></div>
+                    <span className="text-[10px] text-zinc-400 font-black uppercase tracking-widest">Receitas</span>
+                  </div>
+                  <div>
+                    <h3 className="text-3xl font-black text-zinc-900">{formatCurrency(income)}</h3>
+                    <p className="text-[10px] text-emerald-600 font-bold uppercase tracking-widest mt-1">Este mês</p>
+                  </div>
+                </motion.div>
 
-              <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ delay: 0.2 }} className="bg-white p-6 rounded-3xl border border-zinc-200 shadow-sm">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="p-2 bg-rose-50 rounded-xl"><TrendingDown className="w-6 h-6 text-rose-600" /></div>
-                  <span className="text-xs text-zinc-400 font-mono">Despesas</span>
-                </div>
-                <h3 className="text-3xl font-bold text-zinc-900">{formatCurrency(expense)}</h3>
-                <div className="mt-2 flex items-center gap-1 text-xs text-rose-600">
-                  <ArrowDownRight className="w-4 h-4" /> <span>Este mês</span>
-                </div>
-              </motion.div>
-            </div>
-
-            {/* Charts & Recent Transactions */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <div className="bg-white p-6 rounded-3xl border border-zinc-200 shadow-sm min-h-[400px]">
-                <h4 className="font-bold text-zinc-900 mb-6 flex items-center gap-2">
-                  <PieChartIcon className="w-5 h-5 text-zinc-400" /> Gastos por Categoria
-                </h4>
-                <div className="h-[250px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={categoryData}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={60}
-                        outerRadius={80}
-                        paddingAngle={5}
-                        dataKey="value"
-                      >
-                        {categoryData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value: number) => formatCurrency(value)} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-                {/* Legend */}
-                <div className="grid grid-cols-2 gap-2 mt-4">
-                  {categoryData.slice(0, 4).map((c, i) => (
-                    <div key={c.name} className="flex items-center gap-2 text-xs text-zinc-600">
-                      <div className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
-                      <span className="truncate">{c.name}</span>
-                    </div>
-                  ))}
-                </div>
+                <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ delay: 0.2 }} className="bg-white p-6 rounded-3xl border border-zinc-200 shadow-sm flex flex-col justify-between h-40">
+                  <div className="flex items-center justify-between">
+                    <div className="p-2 bg-rose-50 rounded-xl"><TrendingDown className="w-6 h-6 text-rose-600" /></div>
+                    <span className="text-[10px] text-zinc-400 font-black uppercase tracking-widest">Despesas</span>
+                  </div>
+                  <div>
+                    <h3 className="text-3xl font-black text-zinc-900">{formatCurrency(expense)}</h3>
+                    <p className="text-[10px] text-rose-600 font-bold uppercase tracking-widest mt-1">Este mês</p>
+                  </div>
+                </motion.div>
               </div>
 
-              <div className="bg-white p-6 rounded-3xl border border-zinc-200 shadow-sm flex flex-col">
-                <div className="flex items-center justify-between mb-6">
-                  <h4 className="font-bold text-zinc-900 flex items-center gap-2">
-                    <Clock className="w-5 h-5 text-zinc-400" /> Recentes
+              {/* Main Content Area */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="bg-white p-8 rounded-3xl border border-zinc-200 shadow-sm">
+                  <h4 className="font-bold text-zinc-900 mb-6 flex items-center gap-2">
+                    <PieChartIcon className="w-5 h-5 text-zinc-400" /> Gastos
                   </h4>
-                  <button onClick={() => setActiveTab('transactions')} className="text-zinc-500 hover:text-zinc-900 text-sm font-medium">Ver tudo</button>
+                  <div className="h-[200px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={categoryData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={60}
+                          outerRadius={80}
+                          paddingAngle={5}
+                          dataKey="value"
+                        >
+                          {categoryData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip formatter={(value: number) => formatCurrency(value)} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 mt-4">
+                    {categoryData.slice(0, 4).map((c, i) => (
+                      <div key={c.name} className="flex items-center gap-2 text-[10px] font-bold text-zinc-500 uppercase">
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
+                        <span className="truncate">{c.name}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="flex-1 space-y-4">
-                  {filteredTransactions.slice(0, 5).map((t) => (
-                    <div key={t.id} className="flex items-center gap-4 p-3 rounded-2xl hover:bg-zinc-50 transition-colors group">
-                      <div className={cn(
-                        "w-10 h-10 rounded-xl flex items-center justify-center shrink-0",
-                        t.type === 'income' ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-600"
-                      )}>
-                        {t.type === 'income' ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <p className="font-bold text-zinc-900 truncate">{t.description || t.category}</p>
-                          <span className={cn(
-                            "text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase",
-                            t.scope === 'shared' ? "bg-zinc-100 text-zinc-500" : "bg-indigo-50 text-indigo-500"
-                          )}>
-                            {t.scope === 'shared' ? 'Casal' : 'Meu'}
-                          </span>
+
+                <div className="bg-white p-8 rounded-3xl border border-zinc-200 shadow-sm flex flex-col">
+                  <div className="flex items-center justify-between mb-6">
+                    <h4 className="font-bold text-zinc-900 flex items-center gap-2">
+                      <Clock className="w-5 h-5 text-zinc-400" /> Recentes
+                    </h4>
+                    <button onClick={() => setActiveTab('transactions')} className="text-zinc-400 hover:text-zinc-900 text-xs font-bold transition-colors uppercase tracking-widest">Tudo</button>
+                  </div>
+                  <div className="flex-1 space-y-4">
+                    {filteredTransactions.slice(0, 4).map((t) => (
+                      <div key={t.id} className="flex items-center gap-4 transition-colors group">
+                        <div className={cn(
+                          "w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-sm border border-zinc-100",
+                          t.type === 'income' ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-600"
+                        )}>
+                          {t.type === 'income' ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
                         </div>
-                        <p className="text-xs text-zinc-500 uppercase flex items-center gap-1">
-                          <User className="w-3 h-3" /> {t.userName}
-                        </p>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-bold text-zinc-900 truncate text-sm">{t.description || t.category}</p>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className={cn(
+                              "text-[7px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-wider",
+                              t.scope === 'shared' ? "bg-zinc-100 text-zinc-500" : "bg-indigo-50 text-indigo-500"
+                            )}>
+                              {t.scope === 'shared' ? 'Casal' : 'Meu'}
+                            </span>
+                            <span className="text-[9px] text-zinc-400 font-medium uppercase">{format(parseISO(t.date), 'dd MMM')}</span>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className={cn("font-black text-sm font-mono", t.type === 'income' ? "text-emerald-600" : "text-rose-600")}>
+                            {t.type === 'income' ? '+' : '-'}{formatCurrency(t.amount)}
+                          </p>
+                        </div>
                       </div>
-                      <div className="text-right">
-                        <p className={cn("font-bold", t.type === 'income' ? "text-emerald-600" : "text-rose-600")}>
-                          {t.type === 'income' ? '+' : '-'}{formatCurrency(t.amount)}
+                    ))}
+                    {filteredTransactions.length === 0 && (
+                      <div className="h-full flex flex-col items-center justify-center text-zinc-400 py-10 opacity-30 italic text-xs">
+                        Nenhuma transação registrada
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Column: Notification Feed */}
+            <div className="space-y-8">
+              <div className="bg-white p-8 rounded-3xl border border-zinc-200 shadow-sm flex flex-col h-full min-h-[550px]">
+                <h3 className="text-lg font-black text-zinc-900 mb-6 flex items-center gap-2">
+                  <Bell className="w-5 h-5 text-indigo-600" /> Atividade & Feed
+                </h3>
+                <div className="flex-1 space-y-6 overflow-y-auto pr-2 custom-scrollbar">
+                  {notifications.length === 0 && (
+                    <div className="h-full flex flex-col items-center justify-center text-zinc-400 py-10">
+                      <div className="w-16 h-16 bg-zinc-50 rounded-full flex items-center justify-center mb-4">
+                        <CheckCircle2 className="w-8 h-8 opacity-20" />
+                      </div>
+                      <p className="text-xs font-black text-center uppercase tracking-widest">Tudo em dia!</p>
+                      <p className="text-[10px] text-center mt-1 text-zinc-400">Sem notificações no momento.</p>
+                    </div>
+                  )}
+                  {notifications.map((n) => (
+                    <div key={n.id} className="relative pl-6 border-l border-zinc-100 last:border-0 pb-6">
+                      <div className={cn(
+                        "absolute top-0 -left-[5px] w-2.5 h-2.5 rounded-full ring-4 ring-white",
+                        n.type === 'invitation' ? "bg-indigo-600 animate-pulse" : "bg-amber-500"
+                      )} />
+                      <div className="bg-zinc-50 p-4 rounded-2xl hover:bg-zinc-100 transition-all border border-transparent hover:border-zinc-200">
+                        <p className="text-[9px] font-black text-zinc-400 uppercase tracking-widest mb-1">{n.title}</p>
+                        <p className="text-sm text-zinc-900 font-semibold mb-3 leading-snug">{n.message}</p>
+                        
+                        {n.type === 'invitation' && (
+                          <div className="flex gap-2">
+                            <button 
+                              onClick={() => handleAcceptInvitation(n.data)}
+                              className="flex-1 py-2 bg-indigo-600 text-white rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-600/20"
+                            >
+                              Aceitar
+                            </button>
+                            <button 
+                              onClick={() => handleDeclineInvitation(n.id)}
+                              className="flex-1 py-2 bg-white text-zinc-600 border border-zinc-200 rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-zinc-50 transition-colors"
+                            >
+                              Recusar
+                            </button>
+                          </div>
+                        )}
+                        
+                        <p className="mt-2 text-[9px] text-zinc-400 font-bold uppercase italic flex items-center gap-1">
+                          <CalendarIcon className="w-3 h-3" /> {format(n.date, "d 'de' MMMM", { locale: ptBR })}
                         </p>
-                        <p className="text-[10px] text-zinc-400">{format(parseISO(t.date), 'dd/MM/yyyy')}</p>
                       </div>
                     </div>
                   ))}
-                  {filteredTransactions.length === 0 && (
-                    <div className="h-full flex flex-col items-center justify-center text-zinc-400 py-10">
-                      <Calendar className="w-12 h-12 mb-2 opacity-10" />
-                      <p className="text-sm">Nenhuma transação este mês</p>
-                    </div>
-                  )}
                 </div>
               </div>
             </div>
@@ -687,6 +999,152 @@ export const Dashboard: React.FC = () => {
                     </p>
                  </div>
                ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'group' && (
+          <div className="max-w-3xl mx-auto space-y-8">
+            <div className="bg-white p-8 rounded-3xl border border-zinc-200 shadow-sm space-y-8">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-black text-zinc-900 uppercase tracking-tight">Gestão de Grupo</h3>
+                  <p className="text-sm text-zinc-500">Compartilhe finanças com seu parceiro(a)</p>
+                </div>
+                {!profile?.householdId && (
+                  <button 
+                    onClick={handleCreateGroup}
+                    disabled={isInviteLoading}
+                    className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-black uppercase tracking-widest text-[10px] hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-lg shadow-indigo-600/20"
+                  >
+                    <Plus className="w-4 h-4" /> Criar Grupo
+                  </button>
+                )}
+              </div>
+
+              {!profile?.householdId ? (
+                <section className="space-y-6 pt-4 border-t border-zinc-100">
+                  <div className="flex items-center gap-3 mb-2">
+                    <LinkIcon className="w-5 h-5 text-indigo-600" />
+                    <h4 className="font-bold text-zinc-900">Entrar em Grupo Existente</h4>
+                  </div>
+                  <form onSubmit={handleJoinGroup} className="flex gap-4">
+                    <input 
+                      type="text" 
+                      placeholder="Cole o ID do Grupo aqui"
+                      value={joinCode}
+                      onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+                      className="flex-1 px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-zinc-900 transition-all font-mono"
+                    />
+                    <button 
+                      type="submit"
+                      disabled={isInviteLoading || !joinCode}
+                      className="px-6 py-3 bg-zinc-900 text-white rounded-xl font-bold hover:bg-zinc-800 disabled:opacity-50 transition-all whitespace-nowrap"
+                    >
+                      {isInviteLoading ? 'Entrando...' : 'Entrar'}
+                    </button>
+                  </form>
+                  <div className="bg-zinc-50 p-6 rounded-2xl border border-zinc-100 border-dashed">
+                    <p className="text-xs text-zinc-500 text-center">Você não faz parte de nenhum grupo compartilhado no momento. Você pode criar um novo grupo ou pedir para o seu parceiro copiar o ID do grupo dele para você entrar.</p>
+                  </div>
+                </section>
+              ) : (
+                <div className="space-y-8">
+                  <div className="p-6 bg-zinc-900 rounded-3xl text-white shadow-xl flex items-center justify-between">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-zinc-400 mb-1">ID do Grupo</p>
+                      <h4 className="text-lg font-mono font-black">{profile.householdId}</h4>
+                    </div>
+                    <button 
+                      onClick={copyHouseholdId}
+                      className="p-3 bg-white/10 rounded-xl hover:bg-white/20 transition-colors"
+                      title="Copiar ID"
+                    >
+                      <LinkIcon className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <div className="border-t border-zinc-100" />
+
+                  <section className="space-y-4">
+                    <div className="flex items-center gap-3 mb-2">
+                      <User className="w-5 h-5 text-indigo-600" />
+                      <h4 className="font-bold text-zinc-900 uppercase tracking-tight text-sm">Membros do Grupo</h4>
+                    </div>
+                    <div className="space-y-3">
+                      {groupMembers.map((member) => (
+                        <div key={member.uid} className="flex items-center justify-between p-4 bg-zinc-50 rounded-2xl border border-zinc-100">
+                          <div className="flex items-center gap-4">
+                            <div className={cn(
+                              "w-12 h-12 rounded-full flex items-center justify-center text-zinc-600 font-bold shadow-sm",
+                              member.uid === user?.uid ? "bg-indigo-50 border border-indigo-100" : "bg-white"
+                            )}>
+                              {member.displayName.charAt(0)}
+                            </div>
+                            <div>
+                              <p className="text-sm font-bold text-zinc-900 flex items-center gap-2">
+                                {member.displayName}
+                                {member.uid === household?.createdBy && <span className="text-[8px] bg-zinc-900 text-white px-1.5 py-0.5 rounded-full uppercase tracking-widest font-black">Líder</span>}
+                                {member.uid === user?.uid && <span className="text-[8px] bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full uppercase tracking-widest font-black">Você</span>}
+                              </p>
+                              <p className="text-[10px] text-zinc-500 font-medium uppercase">{member.email}</p>
+                            </div>
+                          </div>
+                          {household?.createdBy === user?.uid && member.uid !== user?.uid && (
+                            <button 
+                              onClick={() => handleRemoveMember(member.uid)}
+                              className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors border border-transparent hover:border-rose-100"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section className="space-y-4 pt-6 border-t border-zinc-100">
+                    <div className="flex items-center gap-3 mb-2">
+                      <UserPlus className="w-5 h-5 text-emerald-600" />
+                      <h4 className="font-bold text-zinc-900 uppercase tracking-tight text-sm">Convidar Parceiro</h4>
+                    </div>
+                    <form onSubmit={handleInvite} className="flex gap-4">
+                      <input 
+                        type="email" 
+                        placeholder="E-mail do parceiro" 
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        className="flex-1 px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-zinc-900 transition-all"
+                      />
+                      <button 
+                        type="submit"
+                        disabled={isInviteLoading || !inviteEmail}
+                        className="px-6 py-3 bg-zinc-900 text-white rounded-xl font-bold hover:bg-zinc-800 disabled:opacity-50 transition-all flex items-center gap-2"
+                      >
+                        <Plus className="w-4 h-4" /> <span>{isInviteLoading ? 'Enviando...' : 'Convidar'}</span>
+                      </button>
+                    </form>
+                    {inviteError && <p className="text-[10px] text-rose-500 font-bold uppercase tracking-widest">{inviteError}</p>}
+                  </section>
+
+                  <div className="border-t border-zinc-100" />
+
+                  <section className="space-y-4 p-6 bg-rose-50/30 rounded-3xl border border-rose-100">
+                    <div className="flex items-center gap-3 mb-2">
+                      <LogOut className="w-5 h-5 text-rose-600" />
+                      <h4 className="font-bold text-zinc-900 font-mono text-xs uppercase tracking-widest">Zona de Perigo</h4>
+                    </div>
+                    <p className="text-xs text-zinc-500 leading-relaxed">Ao sair, você voltará para o espaço 100% individual. Suas finanças compartilhadas continuarão disponíveis no grupo para os demais membros.</p>
+                    <button 
+                      onClick={handleLeaveGroup}
+                      disabled={isInviteLoading}
+                      className="w-full py-3 bg-rose-600 text-white rounded-xl font-black uppercase tracking-widest text-[10px] hover:bg-rose-700 transition-all shadow-lg shadow-rose-600/20"
+                    >
+                      {isInviteLoading ? 'Saindo...' : 'Sair Deste Grupo'}
+                    </button>
+                  </section>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -991,6 +1449,47 @@ export const Dashboard: React.FC = () => {
 
                 <div className="border-t border-zinc-100" />
 
+                {/* Members Section */}
+                <section className="space-y-4">
+                  <div className="flex items-center gap-3 mb-2">
+                    <User className="w-5 h-5 text-indigo-600" />
+                    <h4 className="font-bold text-zinc-900">Membros do Grupo</h4>
+                  </div>
+                  <div className="space-y-3">
+                    {groupMembers.map((member) => (
+                      <div key={member.uid} className="flex items-center justify-between p-3 bg-zinc-50 rounded-xl border border-zinc-100">
+                        <div className="flex items-center gap-3">
+                          <div className={cn(
+                            "w-10 h-10 rounded-full flex items-center justify-center text-zinc-600 font-bold shadow-sm",
+                            member.uid === user?.uid ? "bg-indigo-50 border border-indigo-100" : "bg-white"
+                          )}>
+                            {member.displayName.charAt(0)}
+                          </div>
+                          <div>
+                            <p className="text-sm font-bold text-zinc-900 flex items-center gap-2">
+                              {member.displayName}
+                              {member.uid === household?.createdBy && <span className="text-[8px] bg-zinc-900 text-white px-1.5 py-0.5 rounded-full uppercase tracking-widest font-black">Líder</span>}
+                              {member.uid === user?.uid && <span className="text-[8px] bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full uppercase tracking-widest font-black">Você</span>}
+                            </p>
+                            <p className="text-[10px] text-zinc-500 font-medium">{member.email}</p>
+                          </div>
+                        </div>
+                        {household?.createdBy === user?.uid && member.uid !== user?.uid && (
+                          <button 
+                            onClick={() => handleRemoveMember(member.uid)}
+                            className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors border border-transparent hover:border-rose-100"
+                            title="Remover do grupo"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <div className="border-t border-zinc-100" />
+
                 {/* Join Section */}
                 <section className="space-y-4">
                   <div className="flex items-center gap-3 mb-2">
@@ -1015,6 +1514,26 @@ export const Dashboard: React.FC = () => {
                       {isInviteLoading ? '...' : 'Unir'}
                     </button>
                   </form>
+                </section>
+
+                <div className="border-t border-zinc-100" />
+
+                <section className="space-y-4">
+                  <div className="flex items-center gap-3 mb-2">
+                    <LogOut className="w-5 h-5 text-rose-600" />
+                    <h4 className="font-bold text-zinc-900">Zona de Perigo</h4>
+                  </div>
+                  <p className="text-sm text-zinc-500">Ao sair, você voltará para um espaço individual. Suas transações compartilhadas continuarão disponíveis para os membros restantes deste grupo.</p>
+                  <button 
+                    onClick={handleLeaveGroup}
+                    disabled={isInviteLoading || (household?.memberIds.length === 1 && household?.createdBy === user?.uid)}
+                    className="w-full py-3 bg-rose-50 text-rose-600 rounded-xl font-bold hover:bg-rose-100 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                  >
+                    {isInviteLoading ? 'Saindo...' : 'Sair Deste Grupo'}
+                  </button>
+                  {household?.memberIds.length === 1 && household?.createdBy === user?.uid && (
+                    <p className="text-[10px] text-zinc-400 text-center italic">Você é o único membro. Convide alguém ou junte-se a outro grupo.</p>
+                  )}
                 </section>
 
                 <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl">

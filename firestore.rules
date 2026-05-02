@@ -11,6 +11,10 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -31,15 +35,22 @@ service cloud.firestore {
 
     // --- User Profiles ---
     match /users/{userId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && request.auth.uid == userId;
-      allow update: if isSignedIn() && (
-                      request.auth.uid == userId || 
-                      (resource.data.householdId != null && isHouseholdMember(resource.data.householdId))
-                    );
+      allow get, list: if isSignedIn();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId) || (existing().householdId != null && isHouseholdMember(existing().householdId));
     }
 
-    // --- Households ---
+    match /users/{userId}/transactions/{id} {
+      allow read, write: if isOwner(userId);
+    }
+    match /users/{userId}/goals/{id} {
+      allow read, write: if isOwner(userId);
+    }
+    match /users/{userId}/recurring/{id} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // --- Households (Shared Groups) ---
     match /households/{householdId} {
       allow get: if isSignedIn();
       allow list: if isSignedIn() && resource.data.memberIds.hasAny([request.auth.uid]);
@@ -48,23 +59,27 @@ service cloud.firestore {
                       resource.data.memberIds.hasAny([request.auth.uid]) ||
                       resource.data.createdBy == request.auth.uid
                     );
+      allow delete: if isSignedIn() && resource.data.memberIds.hasAny([request.auth.uid]);
+
+      match /transactions/{transactionId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() && incoming().userId == request.auth.uid;
+        allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      }
+      match /goals/{goalId} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn() && isHouseholdMember(householdId);
+      }
+      match /recurring/{recurringId} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn() && isHouseholdMember(householdId);
+      }
     }
 
-    // --- Shared Data Subcollections ---
-    match /households/{householdId}/transactions/{transactionId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && incoming().userId == request.auth.uid;
-      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
-    }
-
-    match /households/{householdId}/goals/{goalId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isHouseholdMember(householdId);
-    }
-
-    match /households/{householdId}/recurring/{recurringId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isHouseholdMember(householdId);
+    match /invitations/{invitationId} {
+      allow read: if isSignedIn() && resource.data.invitedUserId == request.auth.uid;
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && resource.data.invitedUserId == request.auth.uid;
     }
   }
 }

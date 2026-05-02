@@ -1,5 +1,20 @@
 {
   "entities": {
+    "Invitation": {
+      "title": "Invitation",
+      "description": "A group join invitation",
+      "type": "object",
+      "properties": {
+        "householdId": { "type": "string" },
+        "householdName": { "type": "string" },
+        "invitedByEmail": { "type": "string" },
+        "invitedByName": { "type": "string" },
+        "invitedUserId": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["householdId", "invitedUserId", "status"]
+    },
     "User": {
       "title": "User",
       "description": "User profile and household link",

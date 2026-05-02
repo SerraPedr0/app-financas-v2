@@ -1,6 +1,26 @@
 export type TransactionType = 'income' | 'expense';
 export type TransactionScope = 'personal' | 'shared';
 
+export interface Invitation {
+  id?: string;
+  householdId: string;
+  householdName: string;
+  invitedByEmail: string;
+  invitedByName: string;
+  invitedUserId: string;
+  status: 'pending' | 'accepted' | 'declined';
+  createdAt: any;
+}
+
+export interface AppNotification {
+  id: string;
+  type: 'invitation' | 'bill';
+  title: string;
+  message: string;
+  date: Date;
+  data?: any;
+}
+
 export interface Transaction {
   id?: string;
   amount: number;
@@ -29,6 +49,7 @@ export interface RecurringTransaction {
   id?: string;
   amount: number;
   type: TransactionType;
+  scope: TransactionScope;
   category: string;
   description: string;
   dayOfMonth: number;
@@ -47,6 +68,6 @@ export interface UserProfile {
   uid: string;
   email: string;
   displayName: string;
-  householdId: string;
-  createdAt: string;
+  householdId: string | null;
+  createdAt: any;
 }

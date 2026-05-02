@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
-import { doc, setDoc, getDoc, updateDoc, arrayUnion } from 'firebase/firestore';
+import { doc, setDoc, getDoc, updateDoc, arrayUnion, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
 import { motion } from 'motion/react';
 import { Wallet, LogIn, UserPlus } from 'lucide-react';
@@ -25,22 +25,11 @@ export const Login: React.FC = () => {
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         await updateProfile(userCredential.user, { displayName: name });
         
-        // Auto-create personal household
-        const { setDoc, doc, serverTimestamp } = await import('firebase/firestore');
-        const householdId = Math.random().toString(36).substring(2, 10).toUpperCase();
-        
-        await setDoc(doc(db, 'households', householdId), {
-          name: `Meu Grupo`,
-          createdBy: userCredential.user.uid,
-          memberIds: [userCredential.user.uid],
-          createdAt: serverTimestamp()
-        });
-
         await setDoc(doc(db, 'users', userCredential.user.uid), {
           uid: userCredential.user.uid,
           email: userCredential.user.email,
           displayName: name,
-          householdId: householdId,
+          householdId: null,
           createdAt: serverTimestamp()
         });
       }
