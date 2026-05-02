@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { collection, query, onSnapshot, orderBy, addDoc, deleteDoc, doc, serverTimestamp, where, limit, or } from 'firebase/firestore';
+import { collection, query, onSnapshot, orderBy, addDoc, deleteDoc, doc, serverTimestamp, where, limit, or, getDocs, updateDoc, arrayUnion, getDoc } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
-import { Transaction, Goal, RecurringTransaction } from '../types';
+import { Transaction, Goal, RecurringTransaction, Household } from '../types';
 import { formatCurrency, cn, handleFirestoreError, OperationType } from '../lib/utils';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
@@ -12,7 +12,7 @@ import {
   Plus, TrendingUp, TrendingDown, Wallet, Target, 
   Clock, ArrowUpRight, ArrowDownRight, LogOut, Settings,
   PieChart as PieChartIcon, Calendar, User, Filter, MoreVertical,
-  ChevronRight, Trash2, CalendarClock
+  ChevronRight, Trash2, CalendarClock, UserPlus, Link as LinkIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format, startOfMonth, endOfMonth, isWithinInterval, parseISO } from 'date-fns';
@@ -20,12 +20,19 @@ import { ptBR } from 'date-fns/locale';
 
 export const Dashboard: React.FC = () => {
   const { profile, user } = useAuth();
+  const [household, setHousehold] = useState<Household | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [recurring, setRecurring] = useState<RecurringTransaction[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isRecurringModalOpen, setIsRecurringModalOpen] = useState(false);
+  const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'goals' | 'recurring'>('overview');
+  
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [isInviteLoading, setIsInviteLoading] = useState(false);
+  const [inviteError, setInviteError] = useState('');
+  const [joinCode, setJoinCode] = useState('');
   
   // Form State
   const [formData, setFormData] = useState({
@@ -50,6 +57,14 @@ export const Dashboard: React.FC = () => {
 
   useEffect(() => {
     if (!profile?.householdId || !user) return;
+
+    // Fetch household details
+    const householdRef = doc(db, 'households', profile.householdId);
+    const unsubHousehold = onSnapshot(householdRef, (snapshot) => {
+      if (snapshot.exists()) {
+        setHousehold({ id: snapshot.id, ...snapshot.data() } as Household);
+      }
+    });
 
     const transactionsPath = `households/${profile.householdId}/transactions`;
     const q = query(
@@ -88,6 +103,7 @@ export const Dashboard: React.FC = () => {
     });
 
     return () => {
+      unsubHousehold();
       unsubTransactions();
       unsubGoals();
       unsubRecurring();
@@ -169,6 +185,77 @@ export const Dashboard: React.FC = () => {
     }
   };
 
+  const handleInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!profile?.householdId || !user || !inviteEmail) return;
+
+    setIsInviteLoading(true);
+    setInviteError('');
+    try {
+      const q = query(collection(db, 'users'), where('email', '==', inviteEmail.trim()));
+      const querySnapshot = await getDocs(q);
+
+      if (querySnapshot.empty) {
+        setInviteError('Usuário não encontrado. O parceiro deve ter uma conta no app.');
+        return;
+      }
+
+      const invitedUser = querySnapshot.docs[0];
+      const invitedUserId = invitedUser.id;
+
+      // Update household members
+      await updateDoc(doc(db, 'households', profile.householdId), {
+        memberIds: arrayUnion(invitedUserId)
+      });
+
+      // Update invited user's householdId
+      await updateDoc(doc(db, 'users', invitedUserId), {
+        householdId: profile.householdId
+      });
+
+      setInviteEmail('');
+      alert('Parceiro adicionado com sucesso!');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'households');
+    } finally {
+      setIsInviteLoading(false);
+    }
+  };
+
+  const handleJoinGroup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !joinCode) return;
+
+    setIsInviteLoading(true);
+    try {
+      const householdRef = doc(db, 'households', joinCode.trim());
+      const householdSnap = await getDoc(householdRef);
+
+      if (!householdSnap.exists()) {
+        alert('Grupo não encontrado.');
+        return;
+      }
+
+      // Add user to new group
+      await updateDoc(householdRef, {
+        memberIds: arrayUnion(user.uid)
+      });
+
+      // Update user profile
+      await updateDoc(doc(db, 'users', user.uid), {
+        householdId: joinCode.trim()
+      });
+
+      setJoinCode('');
+      setIsGroupModalOpen(false);
+      alert('Você entrou no grupo com sucesso!');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'households');
+    } finally {
+      setIsInviteLoading(false);
+    }
+  };
+
   const copyHouseholdId = () => {
     if (profile?.householdId) {
       navigator.clipboard.writeText(profile.householdId);
@@ -238,10 +325,10 @@ export const Dashboard: React.FC = () => {
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate">{profile?.displayName}</p>
               <button 
-                onClick={copyHouseholdId}
+                onClick={() => setIsGroupModalOpen(true)}
                 className="text-xs text-zinc-500 truncate hover:text-zinc-300 transition-colors flex items-center gap-1 uppercase font-mono"
               >
-                ID: {profile?.householdId} <MoreVertical className="w-3 h-3" />
+                {household?.memberIds.length === 1 ? 'Grupo Individual' : 'Grupo Compartilhado'} <Settings className="w-3 h-3" />
               </button>
             </div>
           </div>
@@ -848,6 +935,105 @@ export const Dashboard: React.FC = () => {
                   Salvar Conta Fixa
                 </button>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Modal - Configurações de Grupo */}
+      <AnimatePresence>
+        {isGroupModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => setIsGroupModalOpen(false)}
+              className="absolute inset-0 bg-zinc-900/40 backdrop-blur-sm" 
+            />
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 20 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              className="relative w-full max-w-lg bg-white rounded-3xl shadow-2xl overflow-hidden shadow-zinc-900/20"
+            >
+              <div className="bg-zinc-900 p-6 text-white flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-bold">Gestão do Grupo</h3>
+                  <p className="text-zinc-400 text-xs">ID: {profile?.householdId}</p>
+                </div>
+                <button onClick={() => setIsGroupModalOpen(false)} className="text-white/60 hover:text-white transition-colors">Fechar</button>
+              </div>
+
+              <div className="p-8 space-y-8">
+                {/* Invite Section */}
+                <section className="space-y-4">
+                  <div className="flex items-center gap-3 mb-2">
+                    <UserPlus className="w-5 h-5 text-indigo-600" />
+                    <h4 className="font-bold text-zinc-900">Convidar Parceiro</h4>
+                  </div>
+                  <p className="text-sm text-zinc-500">Adicione seu parceiro(a) ao grupo usando o e-mail cadastrado dele(a).</p>
+                  <form onSubmit={handleInvite} className="flex gap-2">
+                    <input 
+                      type="email"
+                      placeholder="email@exemplo.com"
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      className="flex-1 px-4 py-2 bg-zinc-50 border border-zinc-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-600 transition-all"
+                      required
+                    />
+                    <button 
+                      type="submit"
+                      disabled={isInviteLoading}
+                      className="bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50 transition-all"
+                    >
+                      {isInviteLoading ? '...' : 'Enviar'}
+                    </button>
+                  </form>
+                  {inviteError && <p className="text-xs text-red-500">{inviteError}</p>}
+                </section>
+
+                <div className="border-t border-zinc-100" />
+
+                {/* Join Section */}
+                <section className="space-y-4">
+                  <div className="flex items-center gap-3 mb-2">
+                    <LinkIcon className="w-5 h-5 text-emerald-600" />
+                    <h4 className="font-bold text-zinc-900">Entrar em Grupo Existente</h4>
+                  </div>
+                  <p className="text-sm text-zinc-500">Já possui um código? Insira-o abaixo para migrar para esse grupo.</p>
+                  <form onSubmit={handleJoinGroup} className="flex gap-2">
+                    <input 
+                      type="text"
+                      placeholder="Código do Grupo"
+                      value={joinCode}
+                      onChange={(e) => setJoinCode(e.target.value)}
+                      className="flex-1 px-4 py-2 bg-zinc-50 border border-zinc-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-600 transition-all font-mono uppercase"
+                      required
+                    />
+                    <button 
+                      type="submit"
+                      disabled={isInviteLoading}
+                      className="bg-emerald-600 text-white px-4 py-2 rounded-xl font-bold hover:bg-emerald-700 disabled:opacity-50 transition-all"
+                    >
+                      {isInviteLoading ? '...' : 'Unir'}
+                    </button>
+                  </form>
+                </section>
+
+                <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl">
+                  <div className="flex gap-3">
+                    <Clock className="w-5 h-5 text-amber-600 shrink-0" />
+                    <p className="text-xs text-amber-800 leading-relaxed">
+                      <strong>Dica:</strong> Seu ID atual é <span className="font-mono bg-white/50 px-1 rounded">{profile?.householdId}</span>. 
+                      Compartilhe este código com quem deseja que entre no seu grupo.
+                    </p>
+                  </div>
+                </div>
+
+                <button 
+                  onClick={copyHouseholdId}
+                  className="w-full py-3 text-zinc-500 hover:text-zinc-900 transition-colors flex items-center justify-center gap-2 text-sm font-medium"
+                >
+                  <MoreVertical className="w-4 h-4" /> Copiar meu ID de Grupo
+                </button>
+              </div>
             </motion.div>
           </div>
         )}

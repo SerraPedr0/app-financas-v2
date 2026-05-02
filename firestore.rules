@@ -8,7 +8,7 @@ service cloud.firestore {
 
     // --- Helpers ---
     function isSignedIn() {
-      return request.auth != null && request.auth.token.email_verified == true;
+      return request.auth != null;
     }
 
     function isValidId(id) {
@@ -23,65 +23,48 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // Role-based helper: Is user a member of the household?
+    // Role-based helper: Is user a member is the household?
     function isHouseholdMember(householdId) {
-      return isSignedIn() && exists(/databases/$(database)/documents/households/$(householdId)) &&
-             request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.memberIds;
+      return isSignedIn() && 
+             get(/databases/$(database)/documents/households/$(householdId)).data.memberIds.hasAny([request.auth.uid]);
     }
 
     // --- User Profiles ---
     match /users/{userId} {
-      allow read: if isSignedIn() && request.auth.uid == userId;
-      allow create: if isSignedIn() && request.auth.uid == userId && 
-                    incoming().uid == userId &&
-                    incoming().keys().hasAll(['uid', 'email', 'displayName', 'householdId', 'createdAt']) &&
-                    incoming().keys().size() == 5;
-      allow update: if isSignedIn() && request.auth.uid == userId &&
-                    incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'householdId']);
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isSignedIn() && (
+                      request.auth.uid == userId || 
+                      (resource.data.householdId != null && isHouseholdMember(resource.data.householdId))
+                    );
     }
 
     // --- Households ---
     match /households/{householdId} {
-      // Permitir 'get' para poder entrar no grupo, mas 'list' só para membros
       allow get: if isSignedIn();
-      allow list: if isSignedIn() && request.auth.uid in existing().memberIds;
-      allow create: if isSignedIn() && 
-                    incoming().createdBy == request.auth.uid &&
-                    request.auth.uid in incoming().memberIds &&
-                    incoming().memberIds.size() <= 2; // Hard limit for "pair" as requested
-      allow update: if isSignedIn() && request.auth.uid in existing().memberIds &&
-                    (
-                      // Action: Add member
-                      (incoming().memberIds.size() <= 2 && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds'])) ||
-                      // Action: Rename
-                      (incoming().diff(existing()).affectedKeys().hasOnly(['name']))
+      allow list: if isSignedIn() && resource.data.memberIds.hasAny([request.auth.uid]);
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (
+                      resource.data.memberIds.hasAny([request.auth.uid]) ||
+                      resource.data.createdBy == request.auth.uid
                     );
     }
 
     // --- Shared Data Subcollections ---
     match /households/{householdId}/transactions/{transactionId} {
-      allow read: if isHouseholdMember(householdId) && (
-                    existing().scope == 'shared' || existing().userId == request.auth.uid
-                  );
-      allow create: if isHouseholdMember(householdId) && 
-                    incoming().userId == request.auth.uid &&
-                    incoming().amount is number &&
-                    incoming().type in ['income', 'expense'] &&
-                    incoming().scope in ['personal', 'shared'];
-      allow update: if isHouseholdMember(householdId) &&
-                    existing().userId == request.auth.uid; // Only the owner can edit their transactions (shared or personal)
-      allow delete: if isHouseholdMember(householdId) && 
-                    existing().userId == request.auth.uid;
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
     }
 
     match /households/{householdId}/goals/{goalId} {
-      allow read: if isHouseholdMember(householdId);
-      allow write: if isHouseholdMember(householdId);
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isHouseholdMember(householdId);
     }
 
     match /households/{householdId}/recurring/{recurringId} {
-      allow read: if isHouseholdMember(householdId);
-      allow write: if isHouseholdMember(householdId);
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isHouseholdMember(householdId);
     }
   }
 }

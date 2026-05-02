@@ -25,7 +25,24 @@ export const Login: React.FC = () => {
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         await updateProfile(userCredential.user, { displayName: name });
         
-        // Profiles are created after household creation/join
+        // Auto-create personal household
+        const { setDoc, doc, serverTimestamp } = await import('firebase/firestore');
+        const householdId = Math.random().toString(36).substring(2, 10).toUpperCase();
+        
+        await setDoc(doc(db, 'households', householdId), {
+          name: `Meu Grupo`,
+          createdBy: userCredential.user.uid,
+          memberIds: [userCredential.user.uid],
+          createdAt: serverTimestamp()
+        });
+
+        await setDoc(doc(db, 'users', userCredential.user.uid), {
+          uid: userCredential.user.uid,
+          email: userCredential.user.email,
+          displayName: name,
+          householdId: householdId,
+          createdAt: serverTimestamp()
+        });
       }
     } catch (err: any) {
       setError(err.message);

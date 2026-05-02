@@ -23,6 +23,7 @@ function AppContent() {
     return <Login />;
   }
 
+  // If user exists but no profile yet (legacy or during creation), show setup
   if (!profile) {
     return <SetupHousehold />;
   }
