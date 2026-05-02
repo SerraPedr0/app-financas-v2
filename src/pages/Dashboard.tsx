@@ -34,6 +34,10 @@ export const Dashboard: React.FC = () => {
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'goals' | 'recurring' | 'group'>('overview');
   
+  // History State
+  const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth());
+  const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
+  
   const [inviteEmail, setInviteEmail] = useState('');
   const [isInviteLoading, setIsInviteLoading] = useState(false);
   const [inviteError, setInviteError] = useState('');
@@ -407,43 +411,32 @@ export const Dashboard: React.FC = () => {
   };
 
   const handleAcceptInvitation = async (invitation: Invitation) => {
-    if (!user) return;
+    if (!user || !profile) return;
     
-    if (profile?.householdId) {
-      if (!window.confirm('Você já faz parte de um grupo. Para aceitar este convite, você sairá do grupo atual. Continuar?')) {
-        return;
-      }
+    const currentGroups = profile.householdIds || (profile.householdId ? [profile.householdId] : []);
+    
+    if (currentGroups.length >= 2) {
+      alert('Você já atingiu o limite de 2 grupos. Saia de um grupo para entrar em outro.');
+      return;
     }
 
     setIsInviteLoading(true);
     try {
       const batch = writeBatch(db);
 
-      // 1. If was in previous household, remove from it
-      if (profile?.householdId) {
-        const oldHouseholdRef = doc(db, 'households', profile.householdId);
-        const oldHouseholdSnap = await getDoc(oldHouseholdRef);
-        if (oldHouseholdSnap.exists()) {
-          const oldMembers = (oldHouseholdSnap.data() as Household).memberIds.filter(id => id !== user.uid);
-          if (oldMembers.length === 0 && oldHouseholdSnap.data().createdBy === user.uid) {
-            batch.delete(oldHouseholdRef);
-          } else {
-            batch.update(oldHouseholdRef, { memberIds: oldMembers });
-          }
-        }
-      }
-
-      // 2. Join new household
+      // Join new household
       batch.update(doc(db, 'households', invitation.householdId), {
         memberIds: arrayUnion(user.uid)
       });
 
-      // 3. Update user profile
+      // Update user profile
+      const newGroups = [...currentGroups, invitation.householdId];
       batch.update(doc(db, 'users', user.uid), {
-        householdId: invitation.householdId
+        householdId: invitation.householdId,
+        householdIds: newGroups
       });
 
-      // 4. Mark invitation as accepted
+      // Mark invitation as accepted
       batch.update(doc(db, 'invitations', invitation.id!), {
         status: 'accepted'
       });
@@ -486,9 +479,14 @@ export const Dashboard: React.FC = () => {
         });
       }
 
-      // 2. Update user profile to null
+      // 2. Update user profile
+      const currentGroups = profile.householdIds || (profile.householdId ? [profile.householdId] : []);
+      const newGroups = currentGroups.filter(id => id !== profile.householdId);
+      const nextActiveGroup = newGroups.length > 0 ? newGroups[0] : null;
+      
       await updateDoc(doc(db, 'users', user.uid), {
-        householdId: null
+        householdId: nextActiveGroup,
+        householdIds: newGroups
       });
 
       alert('Você saiu do grupo com sucesso.');
@@ -511,10 +509,19 @@ export const Dashboard: React.FC = () => {
 
     setIsInviteLoading(true);
     try {
-      // 1. Update removed user's profile to null
-      await updateDoc(doc(db, 'users', targetUid), {
-        householdId: null
-      });
+      // 1. Update removed user's profile
+      const userSnap = await getDoc(doc(db, 'users', targetUid));
+      if (userSnap.exists()) {
+        const userData = userSnap.data() as UserProfile;
+        const currentGroups = userData.householdIds || (userData.householdId ? [userData.householdId] : []);
+        const newGroups = currentGroups.filter(id => id !== profile.householdId);
+        await updateDoc(doc(db, 'users', targetUid), {
+          householdId: userData.householdId === profile.householdId 
+            ? (newGroups.length > 0 ? newGroups[0] : null)
+            : userData.householdId,
+          householdIds: newGroups
+        });
+      }
 
       // 2. Remove from current household memberIds
       const remainingMembers = household.memberIds.filter(id => id !== targetUid);
@@ -531,7 +538,13 @@ export const Dashboard: React.FC = () => {
   };
 
   const handleCreateGroup = async () => {
-    if (!user || profile?.householdId) return;
+    if (!user || !profile) return;
+
+    const currentGroups = profile.householdIds || (profile.householdId ? [profile.householdId] : []);
+    if (currentGroups.length >= 2) {
+      alert('Você já atingiu o limite de 2 grupos.');
+      return;
+    }
     
     const name = window.prompt('Dê um nome para o seu grupo:', 'Nosso Grupo');
     if (!name) return;
@@ -539,15 +552,19 @@ export const Dashboard: React.FC = () => {
     setIsInviteLoading(true);
     try {
       const householdId = Math.random().toString(36).substring(2, 10).toUpperCase();
-      await setDoc(doc(db, 'households', householdId), {
+      const householdRef = doc(db, 'households', householdId);
+      
+      await setDoc(householdRef, {
         name,
         createdBy: user.uid,
         memberIds: [user.uid],
         createdAt: serverTimestamp()
       });
 
+      const newGroups = [...currentGroups, householdId];
       await updateDoc(doc(db, 'users', user.uid), {
-        householdId: householdId
+        householdId: householdId,
+        householdIds: newGroups
       });
 
       alert('Grupo criado! Agora você pode convidar alguém na aba de Gestão de Grupo.');
@@ -560,7 +577,13 @@ export const Dashboard: React.FC = () => {
 
   const handleJoinGroup = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !joinCode || profile?.householdId) return;
+    if (!user || !joinCode || !profile) return;
+
+    const currentGroups = profile.householdIds || (profile.householdId ? [profile.householdId] : []);
+    if (currentGroups.length >= 2) {
+      alert('Você já atingiu o limite de 2 grupos.');
+      return;
+    }
 
     setIsInviteLoading(true);
     try {
@@ -576,8 +599,10 @@ export const Dashboard: React.FC = () => {
         memberIds: arrayUnion(user.uid)
       });
 
+      const newGroups = [...currentGroups, joinCode.trim()];
       await updateDoc(doc(db, 'users', user.uid), {
-        householdId: joinCode.trim()
+        householdId: joinCode.trim(),
+        householdIds: newGroups
       });
 
       setJoinCode('');
@@ -621,7 +646,13 @@ export const Dashboard: React.FC = () => {
   ].sort((a, b) => b.date.getTime() - a.date.getTime());
 
   // Filtered lists based on current dashboard filter
+  // Filter transactions based on active filters and history state
   const filteredTransactions = transactions.filter(t => {
+    const tDate = parseISO(t.date);
+    const dateMatch = tDate.getMonth() === selectedMonth && tDate.getFullYear() === selectedYear;
+    if (!dateMatch) return false;
+    
+    // Scope filter
     if (dashboardFilter === 'all') return true;
     return t.scope === dashboardFilter;
   });
@@ -640,7 +671,12 @@ export const Dashboard: React.FC = () => {
       }, {} as Record<string, number>)
   ).map(([name, value]) => ({ name, value }));
 
-  const COLORS = ['#18181b', '#3f3f46', '#71717a', '#a1a1aa', '#d4d4d8'];
+  const months = [
+    'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+    'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+  ];
+
+  const years = Array.from({ length: 5 }, (_, i) => new Date().getFullYear() - 2 + i);
 
   return (
     <div className="min-h-screen bg-zinc-50 pb-20 md:pb-0">
@@ -699,77 +735,106 @@ export const Dashboard: React.FC = () => {
 
       {/* Main Content */}
       <main className="md:ml-64 p-4 md:p-10 max-w-7xl mx-auto">
-        <header className="flex flex-col sm:flex-row sm:items-center justify-between mb-8 gap-4">
-          <div>
-            <h2 className="text-2xl font-bold text-zinc-900">
-              {activeTab === 'overview' ? 'Visão Geral' : activeTab === 'transactions' ? 'Transações' : activeTab === 'goals' ? 'Metas' : 'Recorrência'}
-            </h2>
-            <p className="text-zinc-500">{format(new Date(), "EEEE, d 'de' MMMM", { locale: ptBR })}</p>
+        <header className="flex flex-col lg:flex-row lg:items-center justify-between mb-8 gap-6">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-6">
+            <div>
+              <h2 className="text-2xl font-bold text-zinc-900">
+                {activeTab === 'overview' ? 'Visão Geral' : activeTab === 'transactions' ? 'Transações' : activeTab === 'goals' ? 'Metas' : activeTab === 'recurring' ? 'Contas Fixas' : 'Gestão de Grupo'}
+              </h2>
+              <p className="text-zinc-500">{format(new Date(), "EEEE, d 'de' MMMM", { locale: ptBR })}</p>
+            </div>
+
+            {/* History Selector */}
+            <div className="flex items-center gap-2 bg-white p-1.5 rounded-2xl border border-zinc-200 shadow-sm">
+              <select 
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(parseInt(e.target.value))}
+                className="bg-transparent text-xs font-bold text-zinc-900 px-3 py-1.5 focus:outline-none appearance-none cursor-pointer hover:bg-zinc-50 rounded-lg transition-colors"
+              >
+                {months.map((m, i) => (
+                  <option key={m} value={i}>{m}</option>
+                ))}
+              </select>
+              <div className="w-[1px] h-4 bg-zinc-200" />
+              <select 
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(parseInt(e.target.value))}
+                className="bg-transparent text-xs font-bold text-zinc-900 px-3 py-1.5 focus:outline-none appearance-none cursor-pointer hover:bg-zinc-50 rounded-lg transition-colors"
+              >
+                {years.map(y => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+            </div>
           </div>
           
-          <div className="flex bg-zinc-200/50 p-1 rounded-2xl w-fit self-start">
-            {[
-              { id: 'all', label: 'Tudo' },
-              { id: 'personal', label: 'Meu' },
-              { id: 'shared', label: household?.name || 'Casal' },
-            ].map((f) => (
-              <button
-                key={f.id}
-                onClick={() => setDashboardFilter(f.id as any)}
-                className={cn(
-                  "px-4 py-2 rounded-xl text-xs font-bold transition-all",
-                  dashboardFilter === f.id ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
-                )}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
+          <div className="flex flex-wrap items-center gap-4">
+            {activeTab !== 'group' && (
+              <div className="flex bg-zinc-200/50 p-1 rounded-2xl w-fit">
+                {[
+                  { id: 'all', label: 'Tudo' },
+                  { id: 'personal', label: 'Meu' },
+                  { id: 'shared', label: household?.name || 'Casal' },
+                ].map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={() => setDashboardFilter(f.id as any)}
+                    className={cn(
+                      "px-4 py-2 rounded-xl text-xs font-bold transition-all",
+                      dashboardFilter === f.id ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                    )}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            )}
 
-          <div className="flex gap-2">
-            {activeTab === 'transactions' && (
-              <button
-                onClick={() => {
-                  const headers = ['Data', 'Tipo', 'Categoria', 'Descrição', 'Valor', 'Responsável'];
-                  const csvContent = [
-                    headers.join(','),
-                    ...transactions.map(t => [
-                      t.date,
-                      t.type,
-                      t.category,
-                      `"${t.description.replace(/"/g, '""')}"`,
-                      t.amount,
-                      `"${t.userName.replace(/"/g, '""')}"`
-                    ].join(','))
-                  ].join('\n');
-                  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-                  const link = document.createElement('a');
-                  link.href = URL.createObjectURL(blob);
-                  link.download = `financas_${format(new Date(), 'yyyy-MM-dd')}.csv`;
-                  link.click();
-                }}
-                className="hidden sm:flex bg-white text-zinc-900 px-4 py-3 rounded-2xl font-medium border border-zinc-200 hover:bg-zinc-50 transition-all items-center gap-2"
-              >
-                <MoreVertical className="w-5 h-5 rotate-90" /> Exportar
-              </button>
-            )}
-            {activeTab === 'recurring' ? (
-              <button
-                onClick={() => setIsRecurringModalOpen(true)}
-                className="bg-amber-600 text-white px-6 py-3 rounded-2xl font-medium shadow-lg hover:bg-amber-700 transition-all flex items-center gap-2"
-              >
-                <Plus className="w-5 h-5" />
-                <span className="hidden sm:inline">Nova Conta Fixa</span>
-              </button>
-            ) : (
-              <button
-                onClick={() => setIsModalOpen(true)}
-                className="bg-zinc-900 text-white px-6 py-3 rounded-2xl font-medium shadow-lg hover:bg-zinc-800 transition-all flex items-center gap-2"
-              >
-                <Plus className="w-5 h-5" />
-                <span className="hidden sm:inline">Nova Transação</span>
-              </button>
-            )}
+            <div className="flex gap-2">
+              {activeTab === 'transactions' && (
+                <button
+                  onClick={() => {
+                    const headers = ['Data', 'Tipo', 'Categoria', 'Descrição', 'Valor', 'Responsável'];
+                    const csvContent = [
+                      headers.join(','),
+                      ...transactions.map(t => [
+                        t.date,
+                        t.type,
+                        t.category,
+                        `"${t.description.replace(/"/g, '""')}"`,
+                        t.amount,
+                        `"${t.userName.replace(/"/g, '""')}"`
+                      ].join(','))
+                    ].join('\n');
+                    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                    const link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = `financas_${format(new Date(), 'yyyy-MM-dd')}.csv`;
+                    link.click();
+                  }}
+                  className="hidden sm:flex bg-white text-zinc-900 px-4 py-3 rounded-2xl font-medium border border-zinc-200 hover:bg-zinc-50 transition-all items-center gap-2"
+                >
+                  <MoreVertical className="w-5 h-5 rotate-90" /> Exportar
+                </button>
+              )}
+              {activeTab === 'recurring' ? (
+                <button
+                  onClick={() => setIsRecurringModalOpen(true)}
+                  className="bg-amber-600 text-white px-6 py-3 rounded-2xl font-medium shadow-lg hover:bg-amber-700 transition-all flex items-center gap-2"
+                >
+                  <Plus className="w-5 h-5" />
+                  <span className="hidden sm:inline">Nova Conta Fixa</span>
+                </button>
+              ) : activeTab !== 'group' && (
+                <button
+                  onClick={() => setIsModalOpen(true)}
+                  className="bg-zinc-900 text-white px-6 py-3 rounded-2xl font-medium shadow-lg hover:bg-zinc-800 transition-all flex items-center gap-2"
+                >
+                  <Plus className="w-5 h-5" />
+                  <span className="hidden sm:inline">Nova Transação</span>
+                </button>
+              )}
+            </div>
           </div>
         </header>
 
@@ -1104,18 +1169,50 @@ export const Dashboard: React.FC = () => {
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-xl font-black text-zinc-900 uppercase tracking-tight">Gestão de Grupo</h3>
-                  <p className="text-sm text-zinc-500">Compartilhe finanças com seu parceiro(a)</p>
+                  <p className="text-sm text-zinc-500 font-medium">Compartilhe finanças com seu parceiro(a)</p>
                 </div>
-                {!profile?.householdId && (
+                {(profile?.householdIds || []).length < 2 && (
                   <button 
                     onClick={handleCreateGroup}
                     disabled={isInviteLoading}
                     className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-black uppercase tracking-widest text-[10px] hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-lg shadow-indigo-600/20"
                   >
-                    <Plus className="w-4 h-4" /> Criar Grupo
+                    <Plus className="w-4 h-4" /> Criar Novo Grupo
                   </button>
                 )}
               </div>
+
+              {/* Group Switcher if multi-group */}
+              {(profile?.householdIds && profile.householdIds.length > 1) && (
+                <div className="space-y-4 pt-4 border-t border-zinc-100">
+                  <h4 className="text-xs font-black text-zinc-400 uppercase tracking-widest">Seus Grupos (Limite: 2)</h4>
+                  <div className="grid grid-cols-2 gap-4">
+                    {profile.householdIds.map((hid) => (
+                      <button
+                        key={hid}
+                        onClick={async () => {
+                          if (hid === profile.householdId) return;
+                          await updateDoc(doc(db, 'users', user.uid), { householdId: hid });
+                        }}
+                        className={cn(
+                          "p-4 rounded-2xl border transition-all text-left group",
+                          profile.householdId === hid 
+                            ? "bg-zinc-900 border-zinc-900 text-white shadow-lg" 
+                            : "bg-white border-zinc-200 text-zinc-600 hover:border-zinc-900 hover:text-zinc-900"
+                        )}
+                      >
+                        <p className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-1">
+                          {profile.householdId === hid ? 'Ativo' : 'Trocar para'}
+                        </p>
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold truncate">{hid}</span>
+                          <ChevronRight className={cn("w-4 h-4 opacity-0 group-hover:opacity-100 transition-all", profile.householdId === hid && "hidden")} />
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {!profile?.householdId ? (
                 <section className="space-y-6 pt-4 border-t border-zinc-100">
@@ -1298,9 +1395,21 @@ export const Dashboard: React.FC = () => {
       <nav className="md:hidden fixed bottom-6 left-6 right-6 h-16 bg-zinc-900 text-white rounded-2xl flex items-center justify-around px-4 shadow-2xl z-20">
         <button onClick={() => setActiveTab('overview')} className={cn("p-2", activeTab === 'overview' ? "text-white" : "text-zinc-500")} title="Visão Geral"><PieChartIcon className="w-5 h-6" /></button>
         <button onClick={() => setActiveTab('transactions')} className={cn("p-2", activeTab === 'transactions' ? "text-white" : "text-zinc-500")} title="Extrato"><CalendarClock className="w-6 h-6" /></button>
-        <button onClick={() => setIsModalOpen(true)} className="bg-white text-zinc-900 p-3 rounded-xl shadow-xl -mt-8 border-4 border-zinc-50" title="Novo Lançamento"><Plus className="w-6 h-6" /></button>
+        <button 
+          onClick={() => {
+            if (activeTab === 'group') return;
+            setIsModalOpen(true);
+          }} 
+          className={cn(
+            "bg-white text-zinc-900 p-3 rounded-xl shadow-xl -mt-8 border-4 border-zinc-50 transition-all",
+            activeTab === 'group' && "opacity-0 scale-0 pointer-events-none"
+          )} 
+          title="Novo Lançamento"
+        >
+          <Plus className="w-6 h-6" />
+        </button>
         <button onClick={() => setActiveTab('goals')} className={cn("p-2", activeTab === 'goals' ? "text-white" : "text-zinc-500")} title="Metas"><Target className="w-6 h-6" /></button>
-        <button onClick={() => setActiveTab('profile')} className={cn("p-2", activeTab === 'profile' ? "text-white" : "text-zinc-500")} title="Perfil e Grupo"><User className="w-6 h-6" /></button>
+        <button onClick={() => setActiveTab('group')} className={cn("p-2", activeTab === 'group' ? "text-white" : "text-zinc-500")} title="Perfil e Grupo"><User className="w-6 h-6" /></button>
       </nav>
 
       {/* Modal - Nova Transação */}

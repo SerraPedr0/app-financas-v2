@@ -31,6 +31,8 @@ service cloud.firestore {
     function isHouseholdMember(householdId) {
       return isSignedIn() && (
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.householdId == householdId ||
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.keys().hasAll(['householdIds']) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.householdIds.hasAny([householdId])) ||
         (exists(/databases/$(database)/documents/households/$(householdId)) &&
          get(/databases/$(database)/documents/households/$(householdId)).data.memberIds.hasAny([request.auth.uid]))
       );
@@ -72,7 +74,7 @@ service cloud.firestore {
       allow list: if isSignedIn();
       allow create: if isOwner(userId) && isValidUser(incoming());
       allow update: if isOwner(userId) && (
-        incoming().diff(existing()).affectedKeys().hasOnly(['householdId', 'displayName', 'photoURL'])
+        incoming().diff(existing()).affectedKeys().hasOnly(['householdId', 'householdIds', 'displayName', 'photoURL'])
       );
     }
 

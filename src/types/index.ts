@@ -77,6 +77,7 @@ export interface UserProfile {
   uid: string;
   email: string;
   displayName: string;
-  householdId: string | null;
+  householdId: string | null; // Currently active group
+  householdIds?: string[]; // All groups the user is a member of
   createdAt: any;
 }
