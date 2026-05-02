@@ -57,7 +57,14 @@ service cloud.firestore {
       allow create: if isSignedIn();
       allow update: if isSignedIn() && (
                       resource.data.memberIds.hasAny([request.auth.uid]) ||
-                      resource.data.createdBy == request.auth.uid
+                      resource.data.createdBy == request.auth.uid ||
+                      (
+                        // Allow joining if there's a deterministic pending invitation
+                        exists(/databases/$(database)/documents/invitations/$(request.auth.uid + "_" + householdId)) &&
+                        get(/databases/$(database)/documents/invitations/$(request.auth.uid + "_" + householdId)).data.status == 'pending' &&
+                        request.resource.data.memberIds.hasAll(resource.data.memberIds) &&
+                        request.resource.data.memberIds.hasAny([request.auth.uid])
+                      )
                     );
       allow delete: if isSignedIn() && resource.data.memberIds.hasAny([request.auth.uid]);
 
@@ -78,7 +85,7 @@ service cloud.firestore {
 
     match /invitations/{invitationId} {
       allow read: if isSignedIn() && resource.data.invitedUserId == request.auth.uid;
-      allow create: if isSignedIn();
+      allow create: if isSignedIn() && isHouseholdMember(incoming().householdId);
       allow update, delete: if isSignedIn() && resource.data.invitedUserId == request.auth.uid;
     }
   }

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { 
   collection, query, onSnapshot, orderBy, addDoc, deleteDoc, 
   doc, serverTimestamp, where, limit, or, getDocs, 
-  updateDoc, arrayUnion, getDoc, setDoc 
+  updateDoc, arrayUnion, getDoc, setDoc, writeBatch 
 } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
@@ -321,8 +321,9 @@ export const Dashboard: React.FC = () => {
         return;
       }
 
-      // Create invitation instead of direct update
-      await addDoc(collection(db, 'invitations'), {
+      // Create invitation with deterministic ID instead of direct update
+      const invitationId = `${invitedUserId}_${profile.householdId}`;
+      await setDoc(doc(db, 'invitations', invitationId), {
         householdId: profile.householdId,
         householdName: household.name,
         invitedByEmail: user.email,
@@ -345,24 +346,28 @@ export const Dashboard: React.FC = () => {
     if (!user) return;
     setIsInviteLoading(true);
     try {
+      const batch = writeBatch(db);
+
       // 1. Join new household
-      await updateDoc(doc(db, 'households', invitation.householdId), {
+      batch.update(doc(db, 'households', invitation.householdId), {
         memberIds: arrayUnion(user.uid)
       });
 
       // 2. Update user profile
-      await updateDoc(doc(db, 'users', user.uid), {
+      batch.update(doc(db, 'users', user.uid), {
         householdId: invitation.householdId
       });
 
       // 3. Mark invitation as accepted
-      await updateDoc(doc(db, 'invitations', invitation.id!), {
+      batch.update(doc(db, 'invitations', invitation.id!), {
         status: 'accepted'
       });
 
+      await batch.commit();
       alert('Você entrou no novo grupo!');
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'invitations/households');
+      alert('Erro ao aceitar convite. Verifique sua conexão.');
     } finally {
       setIsInviteLoading(false);
     }
