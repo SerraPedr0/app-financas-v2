@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { collection, query, onSnapshot, orderBy, addDoc, deleteDoc, doc, serverTimestamp, where, limit, or } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
-import { Transaction, Goal } from '../types';
+import { Transaction, Goal, RecurringTransaction } from '../types';
 import { formatCurrency, cn, handleFirestoreError, OperationType } from '../lib/utils';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
@@ -311,13 +311,23 @@ export const Dashboard: React.FC = () => {
                 <MoreVertical className="w-5 h-5 rotate-90" /> Exportar
               </button>
             )}
-            <button
-              onClick={() => setIsModalOpen(true)}
-              className="bg-zinc-900 text-white px-6 py-3 rounded-2xl font-medium shadow-lg hover:bg-zinc-800 transition-all flex items-center gap-2"
-            >
-              <Plus className="w-5 h-5" />
-              <span className="hidden sm:inline">Nova Transação</span>
-            </button>
+            {activeTab === 'recurring' ? (
+              <button
+                onClick={() => setIsRecurringModalOpen(true)}
+                className="bg-amber-600 text-white px-6 py-3 rounded-2xl font-medium shadow-lg hover:bg-amber-700 transition-all flex items-center gap-2"
+              >
+                <Plus className="w-5 h-5" />
+                <span className="hidden sm:inline">Nova Conta Fixa</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => setIsModalOpen(true)}
+                className="bg-zinc-900 text-white px-6 py-3 rounded-2xl font-medium shadow-lg hover:bg-zinc-800 transition-all flex items-center gap-2"
+              >
+                <Plus className="w-5 h-5" />
+                <span className="hidden sm:inline">Nova Transação</span>
+              </button>
+            )}
           </div>
         </header>
 

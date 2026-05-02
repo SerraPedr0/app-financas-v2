@@ -42,7 +42,9 @@ service cloud.firestore {
 
     // --- Households ---
     match /households/{householdId} {
-      allow read: if isSignedIn() && request.auth.uid in existing().memberIds;
+      // Permitir 'get' para poder entrar no grupo, mas 'list' só para membros
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && request.auth.uid in existing().memberIds;
       allow create: if isSignedIn() && 
                     incoming().createdBy == request.auth.uid &&
                     request.auth.uid in incoming().memberIds &&

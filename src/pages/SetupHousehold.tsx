@@ -37,7 +37,11 @@ export const SetupHousehold: React.FC = () => {
         createdAt: serverTimestamp()
       });
     } catch (err: any) {
-      handleFirestoreError(err, OperationType.WRITE, 'households/users');
+      try {
+        handleFirestoreError(err, OperationType.WRITE, 'households/users');
+      } catch {
+        setError("Erro ao criar seu grupo. Tente novamente.");
+      }
     } finally {
       setLoading(false);
     }
@@ -67,7 +71,11 @@ export const SetupHousehold: React.FC = () => {
         createdAt: serverTimestamp()
       });
     } catch (err: any) {
-      handleFirestoreError(err, OperationType.WRITE, `households/${joinId}`);
+      try {
+        handleFirestoreError(err, OperationType.WRITE, `households/${joinId}`);
+      } catch {
+        setError(err.message || "Erro ao entrar no grupo. Verifique o ID.");
+      }
     } finally {
       setLoading(false);
     }
