@@ -8,13 +8,15 @@ export interface Invitation {
   invitedByEmail: string;
   invitedByName: string;
   invitedUserId: string;
+  invitedUserEmail?: string;
+  invitedByUserId?: string;
   status: 'pending' | 'accepted' | 'declined';
   createdAt: any;
 }
 
 export interface AppNotification {
   id: string;
-  type: 'invitation' | 'bill';
+  type: 'invitation' | 'bill' | 'transaction';
   title: string;
   message: string;
   date: Date;
@@ -77,6 +79,7 @@ export interface UserProfile {
   uid: string;
   email: string;
   displayName: string;
+  photoURL?: string;
   householdId: string | null; // Currently active group
   householdIds?: string[]; // All groups the user is a member of
   createdAt: any;

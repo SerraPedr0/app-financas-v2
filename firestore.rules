@@ -118,15 +118,9 @@ service cloud.firestore {
         allow read: if isHouseholdMember(householdId);
         allow create: if isHouseholdMember(householdId) && isValidTransaction(incoming());
         allow update: if isHouseholdMember(householdId) && (
-          incoming().userId == request.auth.uid ||
-          get(/databases/$(database)/documents/households/$(householdId)).data.createdBy == request.auth.uid
-        ) && (
           incoming().diff(existing()).affectedKeys().hasOnly(['amount', 'category', 'description', 'date', 'notes', 'splits', 'type', 'scope', 'memberIds'])
         );
-        allow delete: if isHouseholdMember(householdId) && (
-          existing().userId == request.auth.uid ||
-          get(/databases/$(database)/documents/households/$(householdId)).data.createdBy == request.auth.uid
-        );
+        allow delete: if isHouseholdMember(householdId);
       }
       match /goals/{goalId} {
         allow read, write: if isHouseholdMember(householdId);

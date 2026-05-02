@@ -17,7 +17,8 @@ import {
   Clock, ArrowUpRight, ArrowDownRight, LogOut, Settings,
   PieChart as PieChartIcon, Calendar, User, Filter, MoreVertical,
   ChevronRight, Trash2, CalendarClock, UserPlus, Link as LinkIcon,
-  Bell, Calendar as CalendarIcon, CheckCircle2, AlertCircle
+  Bell, Calendar as CalendarIcon, CheckCircle2, AlertCircle,
+  X, Edit2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format, startOfMonth, endOfMonth, isWithinInterval, parseISO } from 'date-fns';
@@ -30,11 +31,14 @@ export const Dashboard: React.FC = () => {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [recurring, setRecurring] = useState<RecurringTransaction[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingTransactionId, setEditingTransactionId] = useState<string | null>(null);
   const [isRecurringModalOpen, setIsRecurringModalOpen] = useState(false);
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'goals' | 'recurring' | 'group'>('overview');
   
-  // History State
+  // Profile Photo State
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [newPhotoUrl, setNewPhotoUrl] = useState('');
   const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth());
   const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
   
@@ -62,6 +66,7 @@ export const Dashboard: React.FC = () => {
   const [recurringFormData, setRecurringFormData] = useState({
     amount: '',
     type: 'expense' as 'income' | 'expense',
+    scope: 'personal' as 'personal' | 'shared',
     category: 'Moradia',
     description: '',
     dayOfMonth: '1'
@@ -266,16 +271,26 @@ export const Dashboard: React.FC = () => {
     }
 
     try {
-      await addDoc(collection(db, path), {
-        ...formData,
-        amount: parseFloat(formData.amount),
-        userId: user.uid,
-        userName: profile.displayName,
-        memberIds: isShared ? household?.memberIds : [user.uid],
-        splits: finalSplits,
-        createdAt: serverTimestamp()
-      });
+      if (editingTransactionId) {
+        await updateDoc(doc(db, path, editingTransactionId), {
+          ...formData,
+          amount: parseFloat(formData.amount),
+          splits: finalSplits,
+          updatedAt: serverTimestamp()
+        });
+      } else {
+        await addDoc(collection(db, path), {
+          ...formData,
+          amount: parseFloat(formData.amount),
+          userId: user.uid,
+          userName: profile.displayName,
+          memberIds: isShared ? household?.memberIds : [user.uid],
+          splits: finalSplits,
+          createdAt: serverTimestamp()
+        });
+      }
       setIsModalOpen(false);
+      setEditingTransactionId(null);
       setFormData({
         amount: '',
         type: 'expense',
@@ -290,6 +305,22 @@ export const Dashboard: React.FC = () => {
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
+  };
+
+  const startEditTransaction = (t: Transaction) => {
+    setEditingTransactionId(t.id!);
+    setFormData({
+      amount: t.amount.toString(),
+      type: t.type,
+      scope: t.scope,
+      category: t.category,
+      description: t.description,
+      date: t.date,
+      notes: t.notes || '',
+      isEqualSplit: t.splits ? false : true, // or some logic to determine if it was equal
+      splits: t.splits ? t.splits.map(s => ({ ...s, amount: s.amount.toString() })) : []
+    });
+    setIsModalOpen(true);
   };
 
   const deleteTransaction = async (id: string) => {
@@ -313,7 +344,7 @@ export const Dashboard: React.FC = () => {
     e.preventDefault();
     if (!user || !profile) return;
 
-    const path = profile.householdId 
+    const path = (recurringFormData.scope === 'shared' && profile.householdId)
       ? `households/${profile.householdId}/recurring` 
       : `users/${user.uid}/recurring`;
 
@@ -324,13 +355,14 @@ export const Dashboard: React.FC = () => {
         dayOfMonth: parseInt(recurringFormData.dayOfMonth),
         userId: user.uid,
         userName: profile.displayName,
-        memberIds: profile.householdId ? household?.memberIds : [user.uid],
+        memberIds: (recurringFormData.scope === 'shared' && profile.householdId) ? household?.memberIds : [user.uid],
         createdAt: serverTimestamp()
       });
       setIsRecurringModalOpen(false);
       setRecurringFormData({
         amount: '',
         type: 'expense',
+        scope: profile.householdId ? 'shared' : 'personal',
         category: 'Moradia',
         description: '',
         dayOfMonth: '1'
@@ -458,6 +490,21 @@ export const Dashboard: React.FC = () => {
       });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'invitations');
+    }
+  };
+
+  const updateProfilePhoto = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !newPhotoUrl.trim()) return;
+
+    try {
+      await updateDoc(doc(db, 'users', user.uid), {
+        photoURL: newPhotoUrl.trim()
+      });
+      setIsProfileModalOpen(false);
+      setNewPhotoUrl('');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'users');
     }
   };
 
@@ -639,9 +686,23 @@ export const Dashboard: React.FC = () => {
       id: bill.id!,
       type: 'bill' as const,
       title: 'Próxima Conta',
-      message: `${bill.description} vence no dia ${bill.dayOfMonth}.`,
+      message: `${bill.description} vence no dia ${bill.dayOfMonth} (Valor: ${formatCurrency(bill.amount)}).`,
       date: new Date(),
       data: bill
+    })),
+    ...transactions.filter(t => {
+      if (t.scope !== 'shared') return false;
+      const tDate = parseISO(t.date);
+      const diffTime = Math.abs(new Date().getTime() - tDate.getTime());
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      return diffDays <= 3; // Transactions from last 3 days
+    }).map(t => ({
+      id: t.id!,
+      type: 'transaction' as const,
+      title: 'Novo Lançamento',
+      message: `${t.userName} adicionou "${t.description || t.category}" no valor de ${formatCurrency(t.amount)}.`,
+      date: parseISO(t.date),
+      data: t
     }))
   ].sort((a, b) => b.date.getTime() - a.date.getTime());
 
@@ -657,19 +718,45 @@ export const Dashboard: React.FC = () => {
     return t.scope === dashboardFilter;
   });
 
+  const filteredRecurring = recurring.filter(r => {
+    if (dashboardFilter === 'all') return true;
+    return r.scope === dashboardFilter;
+  });
+
   // Calculations based on filtered list
-  const balance = filteredTransactions.reduce((acc, t) => t.type === 'income' ? acc + t.amount : acc - t.amount, 0);
-  const income = filteredTransactions.reduce((acc, t) => t.type === 'income' ? acc + t.amount : acc, 0);
-  const expense = filteredTransactions.reduce((acc, t) => t.type === 'expense' ? acc + t.amount : acc, 0);
+  const recurringIncome = filteredRecurring.reduce((acc, r) => r.type === 'income' ? acc + r.amount : acc, 0);
+  const recurringExpense = filteredRecurring.reduce((acc, r) => r.type === 'expense' ? acc + r.amount : acc, 0);
+
+  const income = filteredTransactions.reduce((acc, t) => t.type === 'income' ? acc + t.amount : acc, 0) + recurringIncome;
+  const expense = filteredTransactions.reduce((acc, t) => t.type === 'expense' ? acc + t.amount : acc, 0) + recurringExpense;
+  const balance = income - expense;
 
   const categoryData = Object.entries(
-    filteredTransactions
-      .filter(t => t.type === 'expense')
-      .reduce((acc, t) => {
+    [
+      ...filteredTransactions.filter(t => t.type === 'expense'),
+      ...filteredRecurring.filter(r => r.type === 'expense')
+    ].reduce((acc, t) => {
         acc[t.category] = (acc[t.category] || 0) + t.amount;
         return acc;
       }, {} as Record<string, number>)
   ).map(([name, value]) => ({ name, value }));
+
+  const COLORS = ['#18181b', '#3f3f46', '#71717a', '#a1a1aa', '#d4d4d8'];
+
+  // Calculate daily data for Line Chart
+  const dailyData = Array.from({ length: 31 }, (_, i) => {
+    const day = i + 1;
+    const dayTransactions = filteredTransactions.filter(t => parseISO(t.date).getDate() === day && t.type === 'expense');
+    const total = dayTransactions.reduce((acc, t) => acc + t.amount, 0);
+    return { day, total };
+  }).filter(d => {
+    // Only show up to current day if it's the current month/year
+    const now = new Date();
+    if (selectedMonth === now.getMonth() && selectedYear === now.getFullYear()) {
+      return d.day <= now.getDate();
+    }
+    return true;
+  });
 
   const months = [
     'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
@@ -713,9 +800,19 @@ export const Dashboard: React.FC = () => {
 
         <div className="mt-auto space-y-4 pt-6 border-t border-zinc-800">
           <div className="flex items-center gap-3 px-2">
-            <div className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center text-sm font-bold border border-zinc-700">
-              {profile?.displayName[0].toUpperCase()}
-            </div>
+            <button 
+              onClick={() => {
+                setNewPhotoUrl(profile?.photoURL || '');
+                setIsProfileModalOpen(true);
+              }}
+              className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center text-sm font-bold border border-zinc-700 overflow-hidden hover:border-zinc-500 transition-all cursor-pointer"
+            >
+              {profile?.photoURL ? (
+                <img src={profile.photoURL} alt={profile.displayName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+              ) : (
+                profile?.displayName[0].toUpperCase()
+              )}
+            </button>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate">{profile?.displayName}</p>
               <p className="text-[10px] text-zinc-500 truncate uppercase font-mono">
@@ -734,7 +831,7 @@ export const Dashboard: React.FC = () => {
       </aside>
 
       {/* Main Content */}
-      <main className="md:ml-64 p-4 md:p-10 max-w-7xl mx-auto">
+      <main className="md:ml-64 p-4 md:p-8 w-full">
         <header className="flex flex-col lg:flex-row lg:items-center justify-between mb-8 gap-6">
           <div className="flex flex-col sm:flex-row sm:items-center gap-6">
             <div>
@@ -827,7 +924,21 @@ export const Dashboard: React.FC = () => {
                 </button>
               ) : activeTab !== 'group' && (
                 <button
-                  onClick={() => setIsModalOpen(true)}
+                  onClick={() => {
+                    setEditingTransactionId(null);
+                    setFormData({
+                      amount: '',
+                      type: 'expense',
+                      scope: profile?.householdId ? 'shared' : 'personal',
+                      category: 'Alimentação',
+                      description: '',
+                      date: format(new Date(), 'yyyy-MM-dd'),
+                      notes: '',
+                      isEqualSplit: true,
+                      splits: []
+                    });
+                    setIsModalOpen(true);
+                  }}
                   className="bg-zinc-900 text-white px-6 py-3 rounded-2xl font-medium shadow-lg hover:bg-zinc-800 transition-all flex items-center gap-2"
                 >
                   <Plus className="w-5 h-5" />
@@ -880,6 +991,49 @@ export const Dashboard: React.FC = () => {
                   </div>
                 </motion.div>
               </div>
+
+              {/* Spend Evolution Chart */}
+              <motion.div 
+                initial={{ y: 20, opacity: 0 }} 
+                animate={{ y: 0, opacity: 1 }} 
+                transition={{ delay: 0.3 }}
+                className="bg-white p-8 rounded-3xl border border-zinc-200 shadow-sm"
+              >
+                <h4 className="font-bold text-zinc-900 mb-6 flex items-center gap-2">
+                  <TrendingDown className="w-5 h-5 text-zinc-400" /> Evolução Diária de Gastos
+                </h4>
+                <div className="h-[250px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={dailyData}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                      <XAxis 
+                        dataKey="day" 
+                        axisLine={false} 
+                        tickLine={false} 
+                        tick={{ fontSize: 10, fill: '#94a3b8' }} 
+                      />
+                      <YAxis 
+                        axisLine={false} 
+                        tickLine={false} 
+                        tick={{ fontSize: 10, fill: '#94a3b8' }}
+                        tickFormatter={(value) => `R$ ${value}`}
+                      />
+                      <Tooltip 
+                        formatter={(value: number) => [formatCurrency(value), 'Gasto']}
+                        contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                      />
+                      <Line 
+                        type="monotone" 
+                        dataKey="total" 
+                        stroke="#18181b" 
+                        strokeWidth={3} 
+                        dot={{ r: 4, fill: '#18181b', strokeWidth: 2, stroke: '#fff' }}
+                        activeDot={{ r: 6, strokeWidth: 0 }}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </motion.div>
 
               {/* Main Content Area */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -944,7 +1098,15 @@ export const Dashboard: React.FC = () => {
                                       )}>
                                         {t.scope === 'shared' ? (household?.name || 'Casal') : 'Pessoal'}
                                       </span>
-                                      <span className="text-[9px] text-zinc-400 font-medium uppercase font-mono">{t.userName}</span>
+                                      <div className="flex -space-x-1">
+                                        {t.splits ? t.splits.map((s, idx) => (
+                                          <div key={idx} className="w-4 h-4 rounded-full bg-zinc-900 border border-white flex items-center justify-center text-[6px] text-white font-bold" title={`${s.userName}: ${formatCurrency(s.amount)}`}>
+                                            {s.userName[0]}
+                                          </div>
+                                        )) : (
+                                          <span className="text-[9px] text-zinc-400 font-medium uppercase font-mono">{t.userName}</span>
+                                        )}
+                                      </div>
                                     </div>
                                   </div>
                                   <div className="text-right">
@@ -969,7 +1131,7 @@ export const Dashboard: React.FC = () => {
 
             {/* Right Column: Notification Feed */}
             <div className="space-y-8">
-              <div className="bg-white p-8 rounded-3xl border border-zinc-200 shadow-sm flex flex-col h-full min-h-[550px]">
+              <div className="bg-white p-8 rounded-3xl border border-zinc-200 shadow-sm flex flex-col h-full md:min-h-[550px]">
                 <h3 className="text-lg font-black text-zinc-900 mb-6 flex items-center gap-2">
                   <Bell className="w-5 h-5 text-indigo-600" /> Atividade & Feed
                 </h3>
@@ -987,10 +1149,20 @@ export const Dashboard: React.FC = () => {
                     <div key={n.id} className="relative pl-6 border-l border-zinc-100 last:border-0 pb-6">
                       <div className={cn(
                         "absolute top-0 -left-[5px] w-2.5 h-2.5 rounded-full ring-4 ring-white",
-                        n.type === 'invitation' ? "bg-indigo-600 animate-pulse" : "bg-amber-500"
+                        n.type === 'invitation' ? "bg-indigo-600 animate-pulse" : 
+                        n.type === 'bill' ? "bg-amber-500" : "bg-emerald-500"
                       )} />
-                      <div className="bg-zinc-50 p-4 rounded-2xl hover:bg-zinc-100 transition-all border border-transparent hover:border-zinc-200">
-                        <p className="text-[9px] font-black text-zinc-400 uppercase tracking-widest mb-1">{n.title}</p>
+                      <div className={cn(
+                        "p-4 rounded-2xl transition-all border",
+                        n.type === 'invitation' ? "bg-indigo-50/50 border-indigo-100 hover:bg-indigo-50" :
+                        n.type === 'bill' ? "bg-amber-50/50 border-amber-100 hover:bg-amber-50" :
+                        "bg-emerald-50/50 border-emerald-100 hover:bg-emerald-50"
+                      )}>
+                        <p className={cn(
+                          "text-[9px] font-black uppercase tracking-widest mb-1",
+                          n.type === 'invitation' ? "text-indigo-600" :
+                          n.type === 'bill' ? "text-amber-600" : "text-emerald-600"
+                        )}>{n.title}</p>
                         <p className="text-sm text-zinc-900 font-semibold mb-3 leading-snug">{n.message}</p>
                         
                         {n.type === 'invitation' && (
@@ -1061,20 +1233,40 @@ export const Dashboard: React.FC = () => {
                         <span className="px-3 py-1 bg-zinc-100 rounded-full text-xs text-zinc-600 font-medium">{t.category}</span>
                       </td>
                       <td className="px-6 py-4">
-                        <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 rounded-full bg-zinc-900 flex items-center justify-center text-[10px] text-white">
-                            {t.userName[0]}
-                          </div>
-                          <span className="text-sm text-zinc-700">{t.userName}</span>
+                        <div className="flex flex-col gap-1">
+                          {t.splits ? (
+                            <div className="flex flex-wrap gap-2">
+                              {t.splits.map((s, idx) => (
+                                <div key={idx} className="flex items-center gap-1.5 bg-zinc-50 px-2 py-1 rounded-lg border border-zinc-100">
+                                  <div className="w-5 h-5 rounded-full bg-zinc-900 flex items-center justify-center text-[8px] text-white">
+                                    {s.userName[0]}
+                                  </div>
+                                  <span className="text-[10px] font-bold text-zinc-700 truncate">{s.userName}: {formatCurrency(s.amount)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <div className="w-6 h-6 rounded-full bg-zinc-900 flex items-center justify-center text-[10px] text-white">
+                                {t.userName[0]}
+                              </div>
+                              <span className="text-sm text-zinc-700">{t.userName}</span>
+                            </div>
+                          )}
                         </div>
                       </td>
                       <td className={cn("px-6 py-4 text-right font-bold whitespace-nowrap", t.type === 'income' ? "text-emerald-600" : "text-rose-600")}>
                         {t.type === 'income' ? '+' : '-'}{formatCurrency(t.amount)}
                       </td>
                       <td className="px-6 py-4 text-right">
-                        <button onClick={() => deleteTransaction(t.id!)} className="p-2 text-zinc-400 hover:text-red-500 transition-colors">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center justify-end gap-2">
+                          <button onClick={() => startEditTransaction(t)} className="p-2 text-zinc-400 hover:text-indigo-600 transition-colors">
+                            <Edit2 className="w-4 h-4" />
+                          </button>
+                          <button onClick={() => deleteTransaction(t.id!)} className="p-2 text-zinc-400 hover:text-rose-500 transition-colors">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -1138,7 +1330,7 @@ export const Dashboard: React.FC = () => {
                   <p className="font-bold">Nova Conta Recorrente</p>
                </button>
 
-               {recurring.map(item => (
+               {filteredRecurring.map(item => (
                  <div key={item.id} className="bg-white p-6 rounded-3xl border border-zinc-200 shadow-sm relative group">
                     <button 
                       onClick={() => deleteRecurring(item.id!)}
@@ -1150,9 +1342,9 @@ export const Dashboard: React.FC = () => {
                       "w-12 h-12 rounded-2xl flex items-center justify-center mb-4 font-bold text-xl",
                       item.type === 'expense' ? "bg-rose-50 text-rose-600" : "bg-emerald-50 text-emerald-600"
                     )}>
-                      {item.description[0].toUpperCase()}
+                      {item.description ? item.description[0].toUpperCase() : item.category[0].toUpperCase()}
                     </div>
-                    <h4 className="font-bold text-zinc-900 mb-1">{item.description}</h4>
+                    <h4 className="font-bold text-zinc-900 mb-1">{item.description || item.category}</h4>
                     <p className="text-zinc-500 text-sm mb-4">{item.category} • Dia {item.dayOfMonth}</p>
                     <p className={cn("text-xl font-bold", item.type === 'expense' ? "text-rose-600" : "text-emerald-600")}>
                       {formatCurrency(item.amount)}
@@ -1164,7 +1356,7 @@ export const Dashboard: React.FC = () => {
         )}
 
         {activeTab === 'group' && (
-          <div className="max-w-3xl mx-auto space-y-8">
+          <div className="w-full space-y-8">
             <div className="bg-white p-8 rounded-3xl border border-zinc-200 shadow-sm space-y-8">
               <div className="flex items-center justify-between">
                 <div>
@@ -1409,7 +1601,13 @@ export const Dashboard: React.FC = () => {
           <Plus className="w-6 h-6" />
         </button>
         <button onClick={() => setActiveTab('goals')} className={cn("p-2", activeTab === 'goals' ? "text-white" : "text-zinc-500")} title="Metas"><Target className="w-6 h-6" /></button>
-        <button onClick={() => setActiveTab('group')} className={cn("p-2", activeTab === 'group' ? "text-white" : "text-zinc-500")} title="Perfil e Grupo"><User className="w-6 h-6" /></button>
+        <button onClick={() => setActiveTab('group')} className={cn("p-1.5 rounded-full overflow-hidden", activeTab === 'group' ? "ring-2 ring-white" : "")} title="Perfil e Grupo">
+          {profile?.photoURL ? (
+            <img src={profile.photoURL} alt="Profile" className="w-6 h-6 rounded-full object-cover" referrerPolicy="no-referrer" />
+          ) : (
+            <User className={cn("w-6 h-6", activeTab === 'group' ? "text-white" : "text-zinc-500")} />
+          )}
+        </button>
       </nav>
 
       {/* Modal - Nova Transação */}
@@ -1426,8 +1624,11 @@ export const Dashboard: React.FC = () => {
               className="relative w-full max-w-lg bg-white rounded-3xl shadow-2xl overflow-hidden shadow-zinc-900/20"
             >
               <div className="bg-zinc-900 p-6 text-white flex items-center justify-between">
-                <h3 className="text-xl font-bold">Nova Transação</h3>
-                <button onClick={() => setIsModalOpen(false)} className="text-white/60 hover:text-white transition-colors">Voltar</button>
+                <h3 className="text-xl font-bold">{editingTransactionId ? 'Editar Transação' : 'Nova Transação'}</h3>
+                <button onClick={() => {
+                  setIsModalOpen(false);
+                  setEditingTransactionId(null);
+                }} className="text-white/60 hover:text-white transition-colors">Voltar</button>
               </div>
               <form onSubmit={handleAddTransaction} className="p-8 space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar">
                 <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-100 rounded-2xl">
@@ -1630,7 +1831,7 @@ export const Dashboard: React.FC = () => {
                   type="submit"
                   className="w-full py-4 bg-zinc-900 text-white rounded-2xl font-bold shadow-xl hover:bg-zinc-800 transition-all active:scale-[0.98] mt-4"
                 >
-                  Salvar Lançamento
+                  {editingTransactionId ? 'Salvar Alterações' : 'Salvar Lançamento'}
                 </button>
               </form>
             </motion.div>
@@ -1671,6 +1872,27 @@ export const Dashboard: React.FC = () => {
                     </button>
                   ))}
                 </div>
+
+                {profile?.householdId && (
+                  <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-100 rounded-2xl mt-4">
+                    {[
+                      { id: 'personal', label: 'Meu' },
+                      { id: 'shared', label: household?.name || 'Casal' },
+                    ].map((scope) => (
+                      <button
+                        key={scope.id}
+                        type="button"
+                        onClick={() => setRecurringFormData({ ...recurringFormData, scope: scope.id as any })}
+                        className={cn(
+                          "py-3 rounded-xl font-bold text-sm transition-all",
+                          recurringFormData.scope === scope.id ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                        )}
+                      >
+                        {scope.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 <div className="space-y-4">
                    <div>
@@ -1803,12 +2025,23 @@ export const Dashboard: React.FC = () => {
                     {groupMembers.map((member) => (
                       <div key={member.uid} className="flex items-center justify-between p-3 bg-zinc-50 rounded-xl border border-zinc-100">
                         <div className="flex items-center gap-3">
-                          <div className={cn(
-                            "w-10 h-10 rounded-full flex items-center justify-center text-zinc-600 font-bold shadow-sm",
-                            member.uid === user?.uid ? "bg-indigo-50 border border-indigo-100" : "bg-white"
-                          )}>
-                            {member.displayName.charAt(0)}
-                          </div>
+                          <button 
+                            disabled={member.uid !== user?.uid}
+                            onClick={() => {
+                              setNewPhotoUrl(member.photoURL || '');
+                              setIsProfileModalOpen(true);
+                            }}
+                            className={cn(
+                              "w-10 h-10 rounded-full flex items-center justify-center text-zinc-600 font-bold shadow-sm overflow-hidden",
+                              member.uid === user?.uid ? "bg-indigo-50 border border-indigo-100 cursor-pointer hover:border-indigo-300" : "bg-white border border-transparent"
+                            )}
+                          >
+                            {member.photoURL ? (
+                              <img src={member.photoURL} alt={member.displayName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                            ) : (
+                              member.displayName.charAt(0)
+                            )}
+                          </button>
                           <div>
                             <p className="text-sm font-bold text-zinc-900 flex items-center gap-2">
                               {member.displayName}
@@ -1897,6 +2130,59 @@ export const Dashboard: React.FC = () => {
                   <MoreVertical className="w-4 h-4" /> Copiar meu ID de Grupo
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Profile Photo Modal */}
+      <AnimatePresence>
+        {isProfileModalOpen && (
+          <div className="fixed inset-0 bg-zinc-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="relative w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="bg-zinc-900 p-6 text-white flex items-center justify-between">
+                <h3 className="text-xl font-bold">Foto de Perfil</h3>
+                <button onClick={() => setIsProfileModalOpen(false)} className="text-white/60 hover:text-white transition-colors">
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+              <form onSubmit={updateProfilePhoto} className="p-8 space-y-6">
+                <div className="flex flex-col items-center">
+                  <div className="w-24 h-24 rounded-full bg-zinc-100 flex items-center justify-center text-3xl font-bold border-4 border-zinc-50 overflow-hidden mb-4 shadow-inner">
+                    {newPhotoUrl ? (
+                      <img src={newPhotoUrl} alt="Preview" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    ) : (
+                      profile?.displayName[0].toUpperCase()
+                    )}
+                  </div>
+                  <p className="text-xs text-zinc-500 font-medium">Prévia da imagem</p>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">URL da Imagem</label>
+                    <input 
+                      type="url" 
+                      value={newPhotoUrl}
+                      onChange={(e) => setNewPhotoUrl(e.target.value)}
+                      placeholder="https://exemplo.com/foto.jpg"
+                      className="w-full mt-2 p-4 bg-zinc-50 border border-zinc-200 rounded-2xl focus:ring-2 focus:ring-zinc-900 focus:outline-none text-zinc-900 shadow-inner"
+                      required
+                    />
+                  </div>
+                  <button 
+                    type="submit"
+                    className="w-full py-4 bg-zinc-900 text-white rounded-2xl font-bold shadow-xl hover:bg-zinc-800 transition-all active:scale-[0.98]"
+                  >
+                    Salvar Foto
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </div>
         )}
