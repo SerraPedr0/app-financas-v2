@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { doc, setDoc, updateDoc, arrayUnion, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, updateDoc, arrayUnion, serverTimestamp, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { motion } from 'motion/react';
 import { House, Plus, Hash } from 'lucide-react';
+import { handleFirestoreError, OperationType } from '../lib/utils';
 
 export const SetupHousehold: React.FC = () => {
   const { user } = useAuth();
@@ -27,7 +28,8 @@ export const SetupHousehold: React.FC = () => {
         createdAt: serverTimestamp()
       });
 
-      await setDoc(doc(db, 'users', user.uid), {
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(userRef, {
         uid: user.uid,
         email: user.email,
         displayName: user.displayName || 'Usuário',
@@ -35,7 +37,7 @@ export const SetupHousehold: React.FC = () => {
         createdAt: serverTimestamp()
       });
     } catch (err: any) {
-      setError(err.message);
+      handleFirestoreError(err, OperationType.WRITE, 'households/users');
     } finally {
       setLoading(false);
     }
@@ -46,7 +48,7 @@ export const SetupHousehold: React.FC = () => {
     setLoading(true);
     try {
       const householdRef = doc(db, 'households', joinId);
-      const householdSnap = await (await import('firebase/firestore')).getDoc(householdRef);
+      const householdSnap = await getDoc(householdRef);
 
       if (!householdSnap.exists()) {
         throw new Error('Grupo não encontrado.');
@@ -56,7 +58,8 @@ export const SetupHousehold: React.FC = () => {
         memberIds: arrayUnion(user.uid)
       });
 
-      await setDoc(doc(db, 'users', user.uid), {
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(userRef, {
         uid: user.uid,
         email: user.email,
         displayName: user.displayName || 'Usuário',
@@ -64,7 +67,7 @@ export const SetupHousehold: React.FC = () => {
         createdAt: serverTimestamp()
       });
     } catch (err: any) {
-      setError(err.message);
+      handleFirestoreError(err, OperationType.WRITE, `households/${joinId}`);
     } finally {
       setLoading(false);
     }

@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { collection, query, onSnapshot, orderBy, addDoc, deleteDoc, doc, serverTimestamp, where, limit } from 'firebase/firestore';
+import { collection, query, onSnapshot, orderBy, addDoc, deleteDoc, doc, serverTimestamp, where, limit, or } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { Transaction, Goal } from '../types';
-import { formatCurrency, cn } from '../lib/utils';
+import { formatCurrency, cn, handleFirestoreError, OperationType } from '../lib/utils';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
   PieChart, Pie, Cell, LineChart, Line 
@@ -39,10 +39,15 @@ export const Dashboard: React.FC = () => {
   const [dashboardFilter, setDashboardFilter] = useState<'all' | 'personal' | 'shared'>('all');
 
   useEffect(() => {
-    if (!profile?.householdId) return;
+    if (!profile?.householdId || !user) return;
 
+    const transactionsPath = `households/${profile.householdId}/transactions`;
     const q = query(
-      collection(db, 'households', profile.householdId, 'transactions'),
+      collection(db, transactionsPath),
+      or(
+        where('scope', '==', 'shared'),
+        where('userId', '==', user.uid)
+      ),
       orderBy('date', 'desc'),
       limit(100)
     );
@@ -50,26 +55,32 @@ export const Dashboard: React.FC = () => {
     const unsubTransactions = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Transaction[];
       setTransactions(data);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, transactionsPath);
     });
 
-    const qGoals = query(collection(db, 'households', profile.householdId, 'goals'));
+    const goalsPath = `households/${profile.householdId}/goals`;
+    const qGoals = query(collection(db, goalsPath));
     const unsubGoals = onSnapshot(qGoals, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Goal[];
       setGoals(data);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, goalsPath);
     });
 
     return () => {
       unsubTransactions();
       unsubGoals();
     };
-  }, [profile?.householdId]);
+  }, [profile?.householdId, user?.uid]);
 
   const handleAddTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!profile?.householdId || !user) return;
 
+    const path = `households/${profile.householdId}/transactions`;
     try {
-      await addDoc(collection(db, 'households', profile.householdId, 'transactions'), {
+      await addDoc(collection(db, path), {
         ...formData,
         amount: parseFloat(formData.amount),
         userId: user.uid,
@@ -87,16 +98,17 @@ export const Dashboard: React.FC = () => {
         notes: ''
       });
     } catch (error) {
-      console.error(error);
+      handleFirestoreError(error, OperationType.WRITE, path);
     }
   };
 
   const deleteTransaction = async (id: string) => {
     if (!profile?.householdId || !window.confirm('Excluir esta transação?')) return;
+    const path = `households/${profile.householdId}/transactions/${id}`;
     try {
-      await deleteDoc(doc(db, 'households', profile.householdId, 'transactions', id));
+      await deleteDoc(doc(db, path));
     } catch (error) {
-      console.error(error);
+      handleFirestoreError(error, OperationType.DELETE, path);
     }
   };
 
